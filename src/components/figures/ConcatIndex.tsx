@@ -62,11 +62,11 @@ export default function ConcatIndex({ n = '2.1', title = 'Concatenated index: co
                 </g>
               );
             })}
-            {step >= 1 && (
-              <text x={20} y={190} fontSize={13} fontFamily="var(--font-sans)" fill={order === 'emp' ? C.hot : C.cool}>
-                {order === 'emp' ? `subsidiary ${subsidiary}: ${hitLeaves.size} of 4 leaves, no usable range → full table scan` : `subsidiary ${subsidiary}: ${hitLeaves.size} adjacent leaf${hitLeaves.size > 1 ? 'ves' : ''} → index range scan`}
-              </text>
-            )}
+            <text x={20} y={190} fontSize={13} fontFamily="var(--font-sans)" fill={step >= 1 ? (order === 'emp' ? C.hot : C.cool) : C.textMuted}>
+              {step < 1
+                ? `${ROWS.length} entries in 4 leaf nodes, ${perLeaf} per leaf, sorted by ${order === 'emp' ? 'employee_id' : 'subsidiary_id'} first`
+                : order === 'emp' ? `subsidiary ${subsidiary}: ${hitLeaves.size} of 4 leaves, no usable range → full table scan` : `subsidiary ${subsidiary}: ${hitLeaves.size} adjacent leaf${hitLeaves.size > 1 ? 'ves' : ''} → index range scan`}
+            </text>
           </svg>
         );
       }}

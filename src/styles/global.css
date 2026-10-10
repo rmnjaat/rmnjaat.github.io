@@ -176,8 +176,20 @@ dialog.search { --pf-font: var(--font-sans); --pf-text: var(--ink); --pf-text-mu
 .stepper .controls { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) 12px; margin-top: var(--s2); }
 .stepper .pill { font-family: var(--font-mono); font-size: 12px; letter-spacing: .05em; padding: 3px 8px; border-radius: 4px; background: var(--ink); color: var(--bg); white-space: nowrap; }
 .stepper .caption { flex: 1 1 260px; font-size: 14.5px; line-height: 1.55; color: var(--ink-2); margin: 0; }
-.stepper .btns { display: flex; gap: 6px; margin-left: auto; }
+.stepper .btns { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-wrap: wrap; }
 .stepper .btn.small { border-radius: 999px; }
+.stepper .btn.small.on { background: var(--surface); border-color: var(--ink-2); }
+.stepper .dots { display: flex; gap: 5px; list-style: none; margin: 0 6px 0 0; padding: 0; }
+.stepper .dots button { display: block; width: 14px; height: 14px; padding: 0; border: 0; background: transparent; position: relative; cursor: pointer; }
+.stepper .dots button::after { content: ''; position: absolute; inset: 3px; border-radius: 50%; background: var(--rule); transition: background .25s, transform .25s; }
+.stepper .dots .past button::after { background: var(--mute); }
+.stepper .dots .on button::after { background: var(--accent); transform: scale(1.25); }
+.stepper .swipe-hint { margin: 6px 0 0; font-size: 13px; color: var(--mute); }
+@media (min-width: 601px) { .stepper .swipe-hint { display: none; } }
+/* Motion: every step change eases colours, strokes and positions instead of jumping. */
+.fig-svg rect, .fig-svg circle, .fig-svg line, .fig-svg path, .fig-svg text, .fig-svg g {
+  transition: fill .4s ease, stroke .4s ease, opacity .4s ease, stroke-width .3s ease, stroke-dashoffset .4s ease, x .4s ease, y .4s ease, transform .45s cubic-bezier(.4,0,.2,1), font-weight .2s;
+}
 
 /* ---------- engine tabs ---------- */
 .engine-tabs { margin: 0 0 var(--s4); border: 1px solid var(--rule); border-radius: var(--r); overflow: hidden; font-size: 16px; max-width: var(--measure); }

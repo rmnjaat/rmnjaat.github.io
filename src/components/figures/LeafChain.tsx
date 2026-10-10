@@ -28,24 +28,22 @@ export default function LeafChain({ n = '1.1', title = 'Index leaf nodes and the
               </g>
             );
           })}
-          {step >= 1 && (
-            <g>
-              <Label x={x0} y={botY - 12}>physical order (disk blocks)</Label>
-              {PHYSICAL.map((logical, i) => {
-                const x = x0 + i * (lw + gap);
-                const lx = x0 + logical * (lw + gap);
-                return (
-                  <g key={i}>
-                    <Node x={x} y={botY} w={lw} h={44} dim>
-                      <text x={x + lw / 2} y={botY + 27} textAnchor="middle" fontSize={14} fill={C.textMuted}>{LEAVES[logical]}</text>
-                    </Node>
-                    <line x1={lx + lw / 2} y1={topY + 44} x2={x + lw / 2} y2={botY} stroke={C.muted} strokeWidth={1} strokeDasharray="3 3" />
-                    <text x={x + lw / 2} y={botY + 62} textAnchor="middle" className="lbl">block {i + 1}</text>
-                  </g>
-                );
-              })}
-            </g>
-          )}
+          <g style={{ opacity: step >= 1 ? 1 : 0.28, transition: 'opacity .4s ease' }}>
+            <Label x={x0} y={botY - 12}>physical order (disk blocks)</Label>
+            {PHYSICAL.map((logical, i) => {
+              const x = x0 + i * (lw + gap);
+              const lx = x0 + logical * (lw + gap);
+              return (
+                <g key={i}>
+                  <Node x={x} y={botY} w={lw} h={44} dim>
+                    <text x={x + lw / 2} y={botY + 27} textAnchor="middle" fontSize={14} fill={C.textMuted}>{LEAVES[logical]}</text>
+                  </Node>
+                  <line x1={lx + lw / 2} y1={topY + 44} x2={x + lw / 2} y2={botY} stroke={C.muted} strokeWidth={1} strokeDasharray="3 3" style={{ opacity: step >= 1 ? 1 : 0 }} />
+                  <text x={x + lw / 2} y={botY + 62} textAnchor="middle" className="lbl">block {i + 1}</text>
+                </g>
+              );
+            })}
+          </g>
           {step === 2 && (
             <g>
               <rect x={x0 + 2 * (lw + gap) + lw / 2 - 18} y={topY - 2} width={36} height={48} rx={4} fill="none" stroke={C.hot} strokeWidth={2} />

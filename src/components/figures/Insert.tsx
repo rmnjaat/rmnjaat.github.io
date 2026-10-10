@@ -16,7 +16,7 @@ export default function Insert({ n = '1.4', title = 'Inserting key 56: find the 
         const split = s >= 3; const promoted = s >= 4;
         const l2x = LX[2], newX = LX[2] + 160, l3x = LX[3] + (split ? 175 : 0);
         return (
-          <svg viewBox="0 0 880 330" className="fig-svg" role="img" aria-label="A B-tree while key 56 is inserted">
+          <svg viewBox="0 0 880 372" className="fig-svg" role="img" aria-label="A B-tree while key 56 is inserted">
             {/* pointers */}
             <Arrow x1={306} y1={60} x2={95} y2={120} dim head={false} />
             <Arrow x1={360} y1={60} x2={355} y2={120} hot={s >= 1} dim={s < 1} head={false} />
@@ -49,26 +49,26 @@ export default function Insert({ n = '1.4', title = 'Inserting key 56: find the 
             <Label x={225} y={145} anchor="end">branch</Label>
             {/* leaves */}
             {[[[40, '4A 1B'], [43, '9F 71'], [46, 'A2 D2']], [[46, '8B 1C'], [53, 'A0 A1'], [53, '0D 79']]].map((rows, i) => (
-              <Node key={i} x={LX[i]} y={240} w={130} h={80}>
+              <Node key={i} x={LX[i]} y={240} w={130} h={92}>
                 {rows.map(([k, rid], r) => <g key={r}><text x={LX[i] + 12} y={261 + r * 24} fontSize={12.5} fill={C.text}>{k}</text><text x={LX[i] + 44} y={261 + r * 24} fontSize={12} fill={C.textMuted}>{rid}</text></g>)}
               </Node>
             ))}
             {/* leaf 2: full, then split */}
-            <Node x={l2x} y={240} w={130} h={80} hot={s === 2}>
+            <Node x={l2x} y={240} w={130} h={92} hot={s === 2}>
               {(split ? [[55, '9C F6'], [56, '7E 0A']] : [[55, '9C F6'], [57, 'B1 C1'], [57, '50 29']]).map(([k, rid], r) => (
                 <g key={r}><text x={l2x + 12} y={261 + r * 24} fontSize={12.5} fill={k === 56 ? C.hot : C.text} fontWeight={k === 56 ? 700 : 400}>{k}</text><text x={l2x + 44} y={261 + r * 24} fontSize={12} fill={C.textMuted}>{rid}</text></g>
               ))}
-              {split && <text x={l2x + 65} y={309} textAnchor="middle" className="lbl">room for 1 more</text>}
-              {s === 2 && <text x={l2x + 65} y={309} textAnchor="middle" fontSize={11} fill={C.hot} fontFamily="var(--font-sans)">full: 3 of 3</text>}
+              {split && <text x={l2x + 65} y={326} textAnchor="middle" className="lbl">room for 1 more</text>}
+              {s === 2 && <text x={l2x + 65} y={326} textAnchor="middle" fontSize={11} fill={C.hot} fontFamily="var(--font-sans)">full: 3 of 3</text>}
             </Node>
             {split && (
-              <Node x={newX} y={240} w={130} h={80}>
+              <Node x={newX} y={240} w={130} h={92}>
                 <text x={newX + 12} y={261} fontSize={12.5} fill={C.text}>57</text><text x={newX + 44} y={261} fontSize={12} fill={C.textMuted}>B1 C1</text>
                 <text x={newX + 12} y={285} fontSize={12.5} fill={C.text}>57</text><text x={newX + 44} y={285} fontSize={12} fill={C.textMuted}>50 29</text>
-                <text x={newX + 65} y={309} textAnchor="middle" fontSize={11} fill={C.cool} fontFamily="var(--font-sans)">new leaf</text>
+                <text x={newX + 65} y={326} textAnchor="middle" fontSize={11} fill={C.cool} fontFamily="var(--font-sans)">new leaf</text>
               </Node>
             )}
-            <Node x={l3x} y={240} w={130} h={80}>
+            <Node x={l3x} y={240} w={130} h={92}>
               {[[67, 'C4 6B'], [83, 'FF 9D'], [83, 'AF E9']].map(([k, rid], r) => <g key={r}><text x={l3x + 12} y={261 + r * 24} fontSize={12.5} fill={C.text}>{k}</text><text x={l3x + 44} y={261 + r * 24} fontSize={12} fill={C.textMuted}>{rid}</text></g>)}
             </Node>
             {/* chain */}
@@ -77,9 +77,9 @@ export default function Insert({ n = '1.4', title = 'Inserting key 56: find the 
             {split ? <><Arrow x1={l2x + 130} y1={280} x2={newX} y2={280} both width={1.4} /><Arrow x1={newX + 130} y1={280} x2={l3x} y2={280} both width={1.4} /></> : <Arrow x1={l2x + 130} y1={280} x2={l3x} y2={280} both width={1.4} />}
             {/* travelling entry */}
             {(s === 1 || s === 2) && (
-              <g transform={s === 1 ? 'translate(330 2)' : `translate(${l2x + 36} 292)`}>
-                <rect width={60} height={24} rx={12} fill={C.hotBg} stroke={C.hot} />
-                <text x={30} y={16} textAnchor="middle" fontSize={11} fill={C.hot} fontWeight={700}>56 · 7E 0A</text>
+              <g transform={s === 1 ? 'translate(458 28)' : `translate(${l2x + 26} 344)`}>
+                <rect width={78} height={24} rx={12} fill={C.hotBg} stroke={C.hot} />
+                <text x={39} y={16} textAnchor="middle" fontSize={11} fill={C.hot} fontWeight={700}>56 · 7E 0A</text>
               </g>
             )}
             {promoted && <g><rect x={700} y={200} width={160} height={26} rx={13} fill="var(--ok-bg)" /><text x={780} y={217} textAnchor="middle" fontSize={11} fill="var(--ok)" fontFamily="var(--font-sans)">balanced · depth unchanged</text></g>}

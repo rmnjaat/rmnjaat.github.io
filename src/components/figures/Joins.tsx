@@ -101,17 +101,17 @@ export default function Joins({ n = '4.1', title, mode: initial = 'nested', swit
             <g>
               <Label x={20} y={28}>employees, sorted by employee_id</Label>
               {['e1', 'e2', 'e3', 'e4'].map((e, i) => <Node key={e} x={20 + i * 70} y={40} w={60} h={32} hot={step >= 1 && i < 2} dim={step === 0 ? false : i >= 2}><text x={50 + i * 70} y={61} textAnchor="middle" fontSize={13} fill={C.text}>{e}</text></Node>)}
-              <Label x={20} y={128}>sales, sorted by employee_id</Label>
+              <Label x={304} y={161}>sales, sorted by employee_id</Label>
               {['e1', 'e2', 'e2', 'e4'].map((e, i) => <Node key={i} x={20 + i * 70} y={140} w={60} h={32} hot={step >= 1 && i < 3} dim={step === 0 ? false : i >= 3}><text x={50 + i * 70} y={161} textAnchor="middle" fontSize={13} fill={C.text}>{e}</text></Node>)}
               {step >= 1 && (
                 <g>
                   <Arrow x1={50} y1={72} x2={50} y2={138} hot />
                   <Arrow x1={120} y1={72} x2={120} y2={138} hot />
                   <Arrow x1={120} y1={72} x2={190} y2={138} hot />
-                  <text x={330} y={110} fontSize={13} fontFamily="var(--font-sans)" fill={C.hot}>advance the smaller key, emit on match</text>
+                  <text x={330} y={100} fontSize={13} fontFamily="var(--font-sans)" fill={C.hot}>advance the smaller key, emit on match</text>
                 </g>
               )}
-              {step === 0 && <text x={330} y={110} fontSize={13} fontFamily="var(--font-sans)" fill={C.textMuted}>an index in join-column order makes this sort free</text>}
+              {step === 0 && <text x={330} y={100} fontSize={13} fontFamily="var(--font-sans)" fill={C.textMuted}>an index in join-column order makes this sort free</text>}
               {step === 2 && <text x={20} y={222} fontSize={13} fontFamily="var(--font-sans)" fill={C.cool}>one pass per side, no repeated lookups</text>}
             </g>
           )}

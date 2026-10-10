@@ -12,41 +12,80 @@ interface Props {
   caption?: ReactNode;
 }
 
+const PLAY_MS = 2600;
+
 /**
  * Figure frame with step controls. The figure body is a render prop that
  * receives the current step index; the component owns nothing else.
+ * Play advances one step every PLAY_MS and stops on the last step.
  */
 export default function Stepper({ n, title, steps, children, extra, caption }: Props) {
   const [step, setStep] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [wide, setWide] = useState(false);
   const ref = useRef<HTMLElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
   const last = steps.length - 1;
   const next = useCallback(() => setStep((s) => Math.min(last, s + 1)), [last]);
   const prev = useCallback(() => setStep((s) => Math.max(0, s - 1)), []);
-  useEffect(() => { setStep(0); }, [steps.length]);
+  useEffect(() => { setStep(0); setPlaying(false); }, [steps.length]);
+
+  // Keyboard: arrows step, space toggles play.
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowRight') { e.preventDefault(); next(); }
-      if (e.key === 'ArrowLeft') { e.preventDefault(); prev(); }
+      if ((e.target as HTMLElement).tagName === 'BUTTON' && e.key === ' ') return;
+      if (e.key === 'ArrowRight') { e.preventDefault(); setPlaying(false); next(); }
+      if (e.key === 'ArrowLeft') { e.preventDefault(); setPlaying(false); prev(); }
     };
     el.addEventListener('keydown', onKey);
     return () => el.removeEventListener('keydown', onKey);
   }, [next, prev]);
+
+  // Autoplay.
+  useEffect(() => {
+    if (!playing) return;
+    if (step >= last) { setPlaying(false); return; }
+    const t = setTimeout(() => setStep((s) => Math.min(last, s + 1)), PLAY_MS);
+    return () => clearTimeout(t);
+  }, [playing, step, last]);
+
+  // Is the drawing wider than its box? Then tell phone users they can swipe.
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el || !('ResizeObserver' in window)) return;
+    const check = () => setWide(el.scrollWidth > el.clientWidth + 4);
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    check();
+    return () => ro.disconnect();
+  }, []);
+
   const s = steps[Math.min(step, last)];
+  const togglePlay = () => {
+    if (playing) { setPlaying(false); return; }
+    if (step >= last) setStep(0);
+    setPlaying(true);
+  };
   return (
     <figure className="fig stepper" ref={ref} tabIndex={-1}>
       <div className="fig-head">{n && <span className="fig-n">Figure {n}</span>}<span className="fig-title">{title}</span></div>
-      <div className="fig-body">
+      <div className="fig-body" ref={bodyRef} data-step={step}>
         {children(step)}
+        {wide && <p className="swipe-hint">The drawing is wider than the screen. Swipe sideways to see all of it.</p>}
         <div className="controls">
           {extra}
           <span className="pill" aria-live="polite">{s.label}</span>
           <p className="caption">{s.text}</p>
           <div className="btns">
-            <button type="button" className="btn small" onClick={prev} disabled={step === 0} aria-label="Previous step">◀</button>
-            <button type="button" className="btn small primary" onClick={step === last ? () => setStep(0) : next}>
-              {step === last ? 'Restart' : 'Step ▶'}
+            <ol className="dots" aria-label={`Step ${step + 1} of ${steps.length}`}>
+              {steps.map((st, i) => <li key={i} className={i === step ? 'on' : i < step ? 'past' : ''}><button type="button" aria-label={`Go to step ${i + 1}: ${st.label}`} onClick={() => { setPlaying(false); setStep(i); }} /></li>)}
+            </ol>
+            <button type="button" className="btn small" onClick={() => { setPlaying(false); prev(); }} disabled={step === 0} aria-label="Previous step">◀</button>
+            <button type="button" className={`btn small${playing ? ' on' : ''}`} onClick={togglePlay} aria-pressed={playing} aria-label={playing ? 'Pause' : 'Play all steps'}>{playing ? '❚❚ Pause' : '▶ Play'}</button>
+            <button type="button" className="btn small primary" onClick={() => { setPlaying(false); step === last ? setStep(0) : next(); }}>
+              {step === last ? 'Restart' : 'Step'}
             </button>
           </div>
         </div>
