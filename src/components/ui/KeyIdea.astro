@@ -1,0 +1,6 @@
+---
+/** Quiet panel for the one thing the section must leave behind. <KeyIdea title="Key idea">…</KeyIdea> */
+interface Props { title?: string }
+const { title = 'Key idea' } = Astro.props;
+---
+<aside class="keyidea" role="note"><span class="k">{title}</span><slot /></aside>

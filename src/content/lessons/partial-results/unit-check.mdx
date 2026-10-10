@@ -1,0 +1,77 @@
+---
+title: "Unit check: Partial Results"
+subtitle: Five questions on top-N queries, offset and seek paging, row values and window functions.
+chapter: partial-results
+order: 5
+kind: quiz
+minutes: 6
+summary: Five multiple-choice questions covering the optimizer's need to know about the limit, the two plans of a top-N query, the drawbacks of OFFSET, the deterministic order the seek method requires, and which engines stop a ROW_NUMBER scan early.
+recap:
+  - The database must be told about the limit in the query text to plan for it.
+  - A pipelined top-N query reads N rows; a materialized one reads the table and keeps N rows.
+  - OFFSET counts, drifts and slows down. The seek method lands on the page.
+  - Row values express the boundary; a unique column makes the order deterministic.
+---
+import { Check } from '@/components/mdx';
+
+Five questions on this unit. Each has one best answer, and the explanation after your pick says why.
+
+<Check
+  client:visible
+  question="An application runs SELECT ... ORDER BY sale_date DESC, fetches ten rows and closes the cursor. Why is that not as good as FETCH FIRST 10 ROWS ONLY?"
+  options={[
+    'Closing a cursor early is an error in most databases.',
+    'The optimizer plans before the first fetch. Without the clause it plans for the full result and may choose a full scan with a sort.',
+    'FETCH FIRST uses a different, faster index type.',
+  ]}
+  answer={1}
+  explain="The plan is chosen at prepare time. Only a limit in the query text tells the optimizer that ten rows are enough, which makes the pipelined ORDER BY the better plan. Closing the cursor saves the transfer of the remaining rows, not the work of finding and sorting them."
+/>
+
+<Check
+  client:visible
+  question="Which plan fragment shows a top-N query that did NOT run pipelined?"
+  options={[
+    'COUNT STOPKEY over INDEX FULL SCAN DESCENDING',
+    'SORT ORDER BY STOPKEY over TABLE ACCESS FULL',
+    'IXSCAN (REVERSE) with a row estimate that drops from a million to ten',
+  ]}
+  answer={1}
+  explain="A sort under the limit means the whole input was read before the first row came out; STOPKEY on the sort only limits what is kept in memory. The other two are reverse index scans that stop after ten rows."
+/>
+
+<Check
+  client:visible
+  question="Which of these is NOT a drawback of the offset method?"
+  options={[
+    'Later pages are slower because every skipped row is counted.',
+    'Pages drift when rows are inserted between two requests.',
+    'It cannot fetch an arbitrary page by number.',
+  ]}
+  answer={2}
+  explain="Jumping to any page by number is the one thing offset paging does well, and the one thing the seek method cannot do. Counting through skipped rows and drifting on inserts are the offset method's two problems."
+/>
+
+<Check
+  client:visible
+  question="The seek query is WHERE sale_date < ? ORDER BY sale_date DESC FETCH FIRST 10 ROWS ONLY, and several sales share a date. What goes wrong?"
+  options={[
+    'Nothing; the database breaks ties by physical position.',
+    'Rows of the boundary date that were not on the previous page are skipped, because the order is not deterministic.',
+    'The index cannot be used for a less-than condition.',
+  ]}
+  answer={1}
+  explain="A boundary on the date alone excludes every row of that date, including the ones that belong on the next page. The ORDER BY must be made deterministic with a unique column, and the comparison must then cover both columns: (sale_date, sale_id) < (?, ?)."
+/>
+
+<Check
+  client:visible
+  question="On Db2 LUW, a ROW_NUMBER page with WHERE rn BETWEEN 11 AND 20 reads the whole index. The lesson wraps the query twice instead: rn <= 20 in the inner query, rn > 10 in the outer one. Why does that help?"
+  options={[
+    'The inner condition is a top-N condition the optimizer recognises, so the index scan stops after 20 rows; the outer one then drops ten rows, not a million.',
+    'Two subqueries let Db2 use two indexes at once.',
+    'It does not help; the lesson shows it only to prove that Db2 cannot stop early.',
+  ]}
+  answer={0}
+  explain="A BETWEEN on the row number is not something Db2 turns into an early abort. A plain upper bound, rn <= 20, is: the plan's row estimate drops from a million to 20 at the FETCH. The outer query then removes the first page from twenty rows. See Window functions, section 2."
+/>

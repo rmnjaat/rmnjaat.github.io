@@ -1,0 +1,248 @@
+---
+title: NOT NULL Constraints
+subtitle: Oracle's optimizer trusts constraints, not data. Without a NOT NULL constraint it must assume rows are missing from the index, and function-based indexes can lose that guarantee.
+chapter: where-clause
+order: 6.2
+kind: lesson
+minutes: 9
+summary: Why Oracle can use an index for IS NULL only when a NOT NULL constraint or a constant proves the index is complete, why a user-defined function in the index breaks that proof, how a redundant IS NOT NULL condition or a virtual column restores it, and why built-in functions such as UPPER keep it.
+prereqs: "You should have read <a href='/sql/where-clause/null/index/'>Indexing NULL</a> and know that Oracle leaves all-NULL rows out of an index."
+outcomes:
+  - Why no NULL entries in the data is not enough for the optimizer
+  - Why count(*) is especially affected by a missing NOT NULL constraint
+  - Why a user-defined function in the index hides the NOT NULL property
+  - How an extra IS NOT NULL condition or a virtual column brings the index back
+  - Why built-in functions like UPPER preserve the constraint and what happens when it is dropped
+recap:
+  - To index IS NULL in Oracle, the index needs a column that can never be NULL, and the database has to be sure of that. Data without NULLs is not proof.
+  - Drop a NOT NULL constraint and Oracle may stop using an index that still holds every row; count(*) queries are hit first.
+  - Constants are known to be not NULL. A user-defined function is a black box, so the NOT NULL property of its argument is lost.
+  - Add an always-true IS NOT NULL condition on the function, or move the function into a virtual column with a NOT NULL constraint.
+  - Oracle knows that built-in functions such as UPPER return NULL only for NULL input, as long as the underlying column keeps its constraint.
+source: https://use-the-index-luke.com/sql/where-clause/null/not-null-constraint
+---
+import { Callout, KeyIdea, Check, TryIt } from '@/components/mdx';
+
+The previous lesson ended with a rule: to index an `IS NULL` condition in Oracle, the index must contain a column that can never be NULL. This lesson is about the word *never*. It is not enough that no NULL happens to be stored. The database has to be certain that none can ever be stored; otherwise it must assume that the index is missing some of the table's rows.
+
+## 1. Constraints, not contents
+
+Pair `DATE_OF_BIRTH` with `LAST_NAME` in the index:
+
+```sql
+DROP INDEX emp_dob
+```
+
+```sql
+CREATE INDEX emp_dob_name
+          ON employees (date_of_birth, last_name)
+```
+
+```sql
+SELECT *
+  FROM employees
+ WHERE date_of_birth IS NULL
+```
+
+The query uses the index only while `LAST_NAME` carries a `NOT NULL` constraint. Remove it, and the index becomes unusable for this query, although not a single row has changed:
+
+```sql
+ALTER TABLE employees MODIFY last_name NULL
+```
+
+```sql
+SELECT *
+  FROM employees
+ WHERE date_of_birth IS NULL
+```
+
+Without the constraint, a row with both columns NULL is possible, and such a row would have no index entry. The optimizer cannot rule it out, so it reads the table.
+
+<KeyIdea title="Tip">Without a NOT NULL constraint, Oracle may refuse an index that in fact holds every row. `count(*)` queries suffer first, because the database likes to answer them from the smallest index that is guaranteed to contain every row.</KeyIdea>
+
+Constant expressions, like the `'X'` in the [previous lesson](/sql/where-clause/null/index/), are also known to be never NULL.
+
+## 2. A user-defined function hides the constraint
+
+An index on a user-defined function does not carry a `NOT NULL` property, even when the function obviously never returns NULL:
+
+```sql
+CREATE OR REPLACE FUNCTION blackbox(id IN NUMBER) RETURN NUMBER
+DETERMINISTIC
+IS BEGIN
+   RETURN id;
+END
+```
+
+```sql
+DROP INDEX emp_dob_name
+```
+
+```sql
+CREATE INDEX emp_dob_bb
+          ON employees (date_of_birth, blackbox(employee_id))
+```
+
+```sql
+SELECT *
+  FROM employees
+ WHERE date_of_birth IS NULL
+```
+
+```
+----------------------------------------------------
+| Id | Operation         | Name      | Rows | Cost |
+----------------------------------------------------
+|  0 | SELECT STATEMENT  |           |    1 |  477 |
+|* 1 |  TABLE ACCESS FULL| EMPLOYEES |    1 |  477 |
+----------------------------------------------------
+```
+
+The name says it: the function is a black box to the optimizer, just as in [Case-Insensitive Search](/sql/where-clause/functions/case-insensitive-search/). We can read that it passes its argument straight through; the database only sees a function that returns a number. The `NOT NULL` property of `EMPLOYEE_ID` does not survive the call. The index does in fact contain every row, but the optimizer cannot know that, so it does not use it.
+
+## 3. Telling the optimizer in the query
+
+If you know that the function never returns NULL, say so in the where clause:
+
+```sql
+SELECT *
+  FROM employees
+ WHERE date_of_birth IS NULL
+   AND blackbox(employee_id) IS NOT NULL
+```
+
+```
+-------------------------------------------------------------
+|Id |Operation                   | Name       | Rows | Cost |
+-------------------------------------------------------------
+| 0 |SELECT STATEMENT            |            |    1 |    3 |
+| 1 | TABLE ACCESS BY INDEX ROWID| EMPLOYEES  |    1 |    3 |
+|*2 |  INDEX RANGE SCAN          | EMP_DOB_BB |    1 |    2 |
+-------------------------------------------------------------
+```
+
+The added condition is always true and changes nothing in the result. But it restricts the query to rows that, by the definition of the index, must have an entry, and Oracle recognises that.
+
+## 4. A virtual column with its own constraint
+
+There is no way to declare that a function never returns NULL. What you can do, since Oracle 11g, is move the call into a virtual column and give that column a `NOT NULL` constraint:
+
+```sql
+ALTER TABLE employees ADD bb_expression
+       GENERATED ALWAYS AS (blackbox(employee_id)) NOT NULL
+```
+
+```sql
+DROP   INDEX emp_dob_bb
+```
+
+```sql
+CREATE INDEX emp_dob_bb
+          ON employees (date_of_birth, bb_expression)
+```
+
+```sql
+SELECT *
+  FROM employees
+ WHERE date_of_birth IS NULL
+   AND blackbox(employee_id) IS NOT NULL
+```
+
+```
+-------------------------------------------------------------
+|Id |Operation                   | Name       | Rows | Cost |
+-------------------------------------------------------------
+| 0 |SELECT STATEMENT            |            |    1 |    3 |
+| 1 | TABLE ACCESS BY INDEX ROWID| EMPLOYEES  |    1 |    3 |
+|*2 |  INDEX RANGE SCAN          | EMP_DOB_BB |    1 |    2 |
+-------------------------------------------------------------
+```
+
+The constraint now lives on the column the index is built on, and the proof is back.
+
+## 5. Built-in functions keep the property
+
+Oracle knows that some of its own functions return NULL only when given NULL. `UPPER` is one of them:
+
+```sql
+DROP INDEX emp_dob_bb
+```
+
+```sql
+CREATE INDEX emp_dob_upname
+          ON employees (date_of_birth, upper(last_name))
+```
+
+```sql
+SELECT *
+  FROM employees
+ WHERE date_of_birth IS NULL
+```
+
+```
+----------------------------------------------------------
+|Id |Operation                   | Name           | Cost |
+----------------------------------------------------------
+| 0 |SELECT STATEMENT            |                |    3 |
+| 1 | TABLE ACCESS BY INDEX ROWID| EMPLOYEES      |    3 |
+|*2 |  INDEX RANGE SCAN          | EMP_DOB_UPNAME |    2 |
+----------------------------------------------------------
+```
+
+`UPPER` passes the `NOT NULL` property of `LAST_NAME` through. Drop the constraint on the column, and the index is useless again:
+
+```sql
+ALTER TABLE employees MODIFY last_name NULL
+```
+
+```sql
+SELECT *
+  FROM employees
+ WHERE date_of_birth IS NULL
+```
+
+```
+----------------------------------------------------
+| Id | Operation         | Name      | Rows | Cost |
+----------------------------------------------------
+|  0 | SELECT STATEMENT  |           |    1 |  477 |
+|* 1 |  TABLE ACCESS FULL| EMPLOYEES |    1 |  477 |
+----------------------------------------------------
+```
+
+<Callout kind="warning" title="Common mistake">Dropping a NOT NULL constraint "because the application checks it anyway". In Oracle that can silently turn IS NULL lookups and count(*) queries into full table scans, with no change to any query. Declare every column that must have a value as NOT NULL; it costs nothing and gives every optimizer a fact it cannot discover on its own.</Callout>
+
+## 6. Try it
+
+SQLite stores NULL in every index and never needs the proof, which makes it a useful contrast. The playground rebuilds `employees` with a nullable `date_of_birth` and *no* constraint on `last_name`, then indexes `(date_of_birth, last_name)`.
+
+<TryIt id="2.6.2" tasks={[
+  { text: 'Run the <code>IS NULL</code> query. SQLite uses the index although neither column has a NOT NULL constraint: <code>USING INDEX emp_dob_name</code>.', sql: 'date_of_birth\\s+is\\s+null', plan: 'USING INDEX emp_dob_name' },
+  { text: 'Count the rows with <code>SELECT count(*) FROM employees</code>. SQLite reads the smallest index it can find, whether or not its columns are nullable.', sql: 'count\\(\\*\\)', plan: 'COVERING INDEX' },
+]} setup={`ALTER TABLE employees RENAME TO employees_old;
+CREATE TABLE employees (employee_id INTEGER NOT NULL, subsidiary_id INTEGER NOT NULL, first_name TEXT NOT NULL, last_name TEXT, date_of_birth TEXT, phone_number TEXT NOT NULL, PRIMARY KEY (employee_id, subsidiary_id));
+INSERT INTO employees SELECT * FROM employees_old;
+DROP TABLE employees_old;
+UPDATE employees SET date_of_birth = NULL WHERE employee_id % 50 = 0;
+CREATE INDEX emp_dob_name ON employees (date_of_birth, last_name);
+ANALYZE;`} sql={`SELECT first_name, last_name
+  FROM employees
+ WHERE date_of_birth IS NULL;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 2</summary><div class="d">The plan line reads <code>SCAN employees USING COVERING INDEX ...</code>. In Oracle the same count would avoid an index on nullable columns and use the primary key instead.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT count(&#42;) FROM employees;
+-- plan: SCAN employees USING COVERING INDEX sqlite&#95;autoindex&#95;employees&#95;1</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="In Oracle, an index on (date_of_birth, last_name) serves WHERE date_of_birth IS NULL. After ALTER TABLE employees MODIFY last_name NULL, with no rows changed, what happens?"
+  options={[
+    'Nothing. No last name is NULL, so the index is still complete.',
+    'The query falls back to a full table scan, because the optimizer can no longer prove that every row has an index entry.',
+    'Oracle rebuilds the index automatically without the NULL rows.',
+  ]}
+  answer={1}
+  explain="The optimizer reasons from constraints, not from the contents of the table. Without NOT NULL on last_name a row with both columns NULL is possible, and it would be missing from the index, so the index is no longer safe for IS NULL."
+/>

@@ -1,0 +1,270 @@
+---
+title: Selecting Top-N Rows
+subtitle: Asking for ten rows is only cheap when the database knows in advance that ten is all you want, and has an index that delivers them in order. Then it stops after ten.
+chapter: partial-results
+order: 1
+kind: lesson
+minutes: 10
+summary: What a top-N query is, why the optimizer must be told that only N rows are needed, the FETCH FIRST, LIMIT, TOP and ROWNUM syntax per engine, how the plans differ with and without a pipelined ORDER BY, and why a pipelined top-N query scales with the rows selected rather than the table size.
+prereqs: "You should have read <a href='/sql/sorting-grouping/indexed-order-by/'>Indexed ORDER BY</a> and know what a pipelined ORDER BY is."
+outcomes:
+  - Why closing the cursor after ten rows does not make the query cheaper
+  - The top-N syntax of each engine and what the SQL standard finally added
+  - How to recognise a pipelined top-N query and a materialized one in the plan
+  - Why a pipelined top-N query's response time barely depends on the table size
+  - Why the same query still gets slower the further you page, which the next lesson solves
+recap:
+  - A top-N query limits the result to a fixed number of rows. It is only efficient when its ORDER BY is pipelined.
+  - The optimizer can only plan for a partial result if the query says so. Fetching ten rows and closing the statement is invisible at planning time.
+  - "FETCH FIRST n ROWS ONLY is the SQL:2008 syntax. The older forms are LIMIT (MySQL, PostgreSQL), TOP (SQL Server) and a ROWNUM subquery (Oracle before 12c)."
+  - With a suitable index the plan shows the limit directly over a reverse index scan. Without one a sort sits in between and the whole table is read, though only N rows are kept in memory.
+  - A pipelined top-N query's response time grows with the number of rows selected, not with the table. Only a deeper B-tree makes it slightly slower.
+source: https://use-the-index-luke.com/sql/partial-results/top-n-queries
+---
+import { Callout, KeyIdea, Figure, EngineTabs, Check, TryIt } from '@/components/mdx';
+
+Most screens show the first few rows of something: the ten newest messages, the twenty best matches, whatever fits above the fold. Behind each one is a query that could return far more. If the database has to sort every candidate row to find the ten newest, the screen pays for all of them. A pipelined `ORDER BY` delivers the first rows without reading and sorting the rest, which gives it a very low startup cost and lets the query stop after a handful of rows. This unit is about telling the database that it may stop, in the syntax of each engine, and about what happens when it cannot.
+
+## 1. What a top-N query is
+
+A **top-N query** limits its result to a fixed number of rows, usually the most recent or the best-ranked entries of a larger result. To execute it efficiently the ranking has to come from a [pipelined ORDER BY](/sql/sorting-grouping/indexed-order-by/), so that the database can produce the rows in order and stop.
+
+The obvious way to get only the first rows is to fetch them and close the statement. The problem is timing. The optimizer builds the execution plan before the first row is fetched, and at that point it has no idea you will stop. It has to plan as if you wanted everything. For the full result a table scan with an explicit sort may well be the best plan, while for ten rows the pipelined `ORDER BY` wins even if every row has to be fetched from the table individually. The optimizer can only pick the second plan if it knows you will not read to the end.
+
+<KeyIdea>If you will not read the whole result, say so in the SQL. By the time the first row is fetched, the plan has already been chosen.</KeyIdea>
+
+## 2. The syntax per engine
+
+The SQL standard went without a way to say this for a long time. `FETCH FIRST ... ROWS ONLY` arrived with SQL:2008 as a non-core extension, and by then every engine had its own syntax, which is why both kinds survive. The examples select the ten most recent sales. The base query is always the same, all sales newest first, and the top-N clause stops it after ten rows.
+
+<EngineTabs>
+  <Fragment slot="db2">
+  On Db2, LUW and z/OS alike, the standard `FETCH FIRST` has worked since at least version 9.
+  ```sql
+  SELECT *
+    FROM sales
+   ORDER BY sale_date DESC
+   FETCH FIRST 10 ROWS ONLY
+  ```
+  The MySQL-style `LIMIT` keyword works on Db2 LUW from 9.7 when `DB2_COMPATIBILITY_VECTOR=MYS` is set.
+  </Fragment>
+  <Fragment slot="mysql">
+  MySQL and PostgreSQL use the `LIMIT` clause.
+  ```sql
+  SELECT *
+    FROM sales
+   ORDER BY sale_date DESC
+   LIMIT 10
+  ```
+  </Fragment>
+  <Fragment slot="oracle">
+  Oracle added `FETCH FIRST` in release 12c. Earlier releases use the `ROWNUM` pseudo column, which numbers the rows of a result as they are produced. To filter on it after sorting, the sorted query has to be wrapped.
+  ```sql
+  SELECT *
+    FROM (
+         SELECT *
+           FROM sales
+          ORDER BY sale_date DESC
+         )
+   WHERE rownum <= 10
+  ```
+  </Fragment>
+  <Fragment slot="postgresql">
+  PostgreSQL supports `FETCH FIRST` since 8.4. The older `LIMIT` form still works.
+  ```sql
+  SELECT *
+    FROM sales
+   ORDER BY sale_date DESC
+   FETCH FIRST 10 ROWS ONLY
+  ```
+  </Fragment>
+  <Fragment slot="sql-server">
+  SQL Server uses `TOP`.
+  ```sql
+  SELECT TOP 10 *
+    FROM sales
+   ORDER BY sale_date DESC
+  ```
+  From SQL Server 2012 the standard `FETCH FIRST` form is supported too, but only together with `OFFSET`: `ORDER BY sale_date DESC OFFSET 0 ROWS FETCH FIRST 10 ROWS ONLY`. Without the `OFFSET` clause it is a syntax error.
+  </Fragment>
+  <Fragment slot="sqlite">
+  SQLite uses `LIMIT 10`, like MySQL.
+  </Fragment>
+</EngineTabs>
+
+All of these are recognised by their engine as top-N queries. The syntax is more than a filter on the output: it is information the optimizer uses when it chooses the plan.
+
+<Callout kind="important">A limit the optimizer never saw is a limit it could not plan for.</Callout>
+
+## 3. Two plans for the same query
+
+When the optimizer knows that ten rows are enough, it prefers a pipelined `ORDER BY` wherever one is possible. With the index `sales_dt_pr` on `(sale_date, product_id)` from the previous unit, the plans look like this.
+
+<EngineTabs>
+  <Fragment slot="db2">
+  ```
+  Explain Plan
+  -----------------------------------------------------------------
+  ID | Operation                      |               Rows |   Cost
+   1 | RETURN                         |                    |     24
+   2 |  FETCH SALES                   |      10 of 1009326 | 458452
+   3 |   IXSCAN (REVERSE) SALES_DT_PR | 1009326 of 1009326 |   2624
+
+  Predicate Information
+  ```
+  Db2 does not label a top-N query as such unless a sort is needed, in which case the `last_explained` view shows `SORT (TOP-N)`. The hint here is the sudden drop in the row estimate from a million to ten, with an empty predicate section that cannot explain it.
+  </Fragment>
+  <Fragment slot="oracle">
+  ```
+  -------------------------------------------------------------
+  | Operation                     | Name        | Rows | Cost |
+  -------------------------------------------------------------
+  | SELECT STATEMENT              |             |   10 |    9 |
+  |  COUNT STOPKEY                |             |      |      |
+  |   VIEW                        |             |   10 |    9 |
+  |    TABLE ACCESS BY INDEX ROWID| SALES       | 1004K|    9 |
+  |     INDEX FULL SCAN DESCENDING| SALES_DT_PR |   10 |    3 |
+  -------------------------------------------------------------
+  ```
+  `COUNT STOPKEY` is the planned early exit: the database recognised the top-N syntax.
+  </Fragment>
+  <Fragment slot="postgresql">
+  ```
+  Limit
+    ->  Index Scan Backward using sales_dt_pr on sales
+  ```
+  A `Limit` node directly over the backward index scan.
+  </Fragment>
+  <Fragment slot="mysql">
+  ```
+  -> Limit: 10 row(s)
+      -> Index scan on sales using sales_dt_pr (reverse)
+  ```
+  </Fragment>
+  <Fragment slot="sql-server">
+  ```
+  |--Top(TOP EXPRESSION:((10)))
+       |--Nested Loops(Inner Join)
+            |--Index Scan(OBJECT:([sales].[sales_dt_pr]), ORDERED BACKWARD)
+            |--Clustered Index Seek(OBJECT:([sales].[sales_pk]) LOOKUP ORDERED FORWARD)
+  ```
+  </Fragment>
+</EngineTabs>
+
+<Callout kind="tip">The [execution plan reference](/sql/explain-plan/) lists the operations for each engine: [Db2](/sql/explain-plan/db2/), [MySQL](/sql/explain-plan/mysql/), [Oracle](/sql/explain-plan/oracle/), [PostgreSQL](/sql/explain-plan/postgresql/) and [SQL Server](/sql/explain-plan/sql-server/).</Callout>
+
+Now the other case. Without a suitable index on `sale_date` there is no pipelined `ORDER BY`, so the database has to read the whole table and sort it. The first row cannot leave before the last row has been read.
+
+<EngineTabs>
+  <Fragment slot="db2">
+  ```
+  Explain Plan
+  -----------------------------------------------------------
+  ID | Operation       |                         Rows |  Cost
+   1 | RETURN          |                              | 59835
+   2 |  TBSCAN         |           10 of 10 (100.00%) | 59835
+   3 |   SORT (TOP-N)  |      10 of 1009326 (   .00%) | 59835
+   4 |    TBSCAN SALES | 1009326 of 1009326 (100.00%) | 59739
+
+  Predicate Information
+  ```
+  </Fragment>
+  <Fragment slot="oracle">
+  ```
+  --------------------------------------------------
+  | Operation               | Name  | Rows |  Cost |
+  --------------------------------------------------
+  | SELECT STATEMENT        |       |   10 | 59558 |
+  |  COUNT STOPKEY          |       |      |       |
+  |   VIEW                  |       | 1004K| 59558 |
+  |    SORT ORDER BY STOPKEY|       | 1004K| 59558 |
+  |     TABLE ACCESS FULL   | SALES | 1004K|  9246 |
+  --------------------------------------------------
+  ```
+  </Fragment>
+  <Fragment slot="postgresql">
+  ```
+  Limit
+    ->  Sort
+          Sort Key: sale_date DESC
+          ->  Seq Scan on sales
+  ```
+  `EXPLAIN ANALYZE` adds `Sort Method: top-N heapsort`, which is the memory saving described below, not an early exit.
+  </Fragment>
+  <Fragment slot="mysql">
+  ```
+  -> Limit: 10 row(s)
+      -> Sort: sales.sale_date DESC, limit input to 10 row(s) per chunk
+          -> Table scan on sales
+  ```
+  The tabular `EXPLAIN` shows `Using filesort`.
+  </Fragment>
+  <Fragment slot="sql-server">
+  ```
+  |--Sort(TOP 10, ORDER BY:([sale_date] DESC))
+       |--Clustered Index Scan(OBJECT:([sales].[sales_pk]))
+  ```
+  </Fragment>
+</EngineTabs>
+
+This plan is almost as slow as fetching ten rows and closing the cursor from the client. Almost: the top-N syntax is not wasted, because the sort keeps only the ten best rows seen so far instead of the whole sorted result. That takes far less memory. Oracle marks this with the `STOPKEY` modifier on `SORT ORDER BY`, Db2 with `SORT (TOP-N)`.
+
+<KeyIdea title="Remember">In a pipelined top-N query the scan stops after N rows. A sort underneath the limit means the scan ran to the end and the limit saved memory, not reads.</KeyIdea>
+
+## 4. Why this is about scalability
+
+The pipelined version pays off twice. The immediate gain is response time. The larger gain is that the response time stops depending on the table size. Without a pipelined `ORDER BY` the query gets slower as the table grows, in a straight line. With one, the query reads ten index entries and ten rows no matter how many rows the table has; it only becomes marginally slower when the B-tree gains a level, which happens rarely.
+
+<Figure n="7.1" title="Scalability of top-N queries">
+
+| Data volume | Materialized sort | Pipelined ORDER BY |
+| --- | --- | --- |
+| 20 | 1.4 s | 0.1 s |
+| 40 | 2.8 s | 0.1 s |
+| 60 | 4.2 s | 0.1 s |
+| 80 | 5.6 s | 0.1 s |
+| 100 | 7.0 s | 0.1 s |
+
+<p slot="caption">The shape of the original measurement over a growing data volume: the materialized variant grows linearly, the pipelined variant stays flat. The numbers are illustrative.</p>
+</Figure>
+
+The response time of a pipelined top-N query is independent of the table size, not of the page size. Ask for twenty rows and it takes twice as long as for ten. That becomes a problem for paging, where the query for page two typically starts at the first row again, reads the ten rows of page one, throws them away, and only then reaches the rows it was asked for. Page fifty reads and discards 490 rows. The [next lesson](/sql/partial-results/fetch-next-page/) solves that.
+
+<Callout kind="warning" title="Common mistake">Indexing the `ORDER BY` column alone when the query also has a where clause. `WHERE subsidiary_id = 20 ORDER BY sale_date DESC FETCH FIRST 10 ROWS ONLY` needs `(subsidiary_id, sale_date)`. With an index on `sale_date` only, the database walks backwards past every sale of the other subsidiaries until it has found ten of the right one.</Callout>
+
+<Callout kind="note" title="Further reading">The blog article [Finding the Best Match With a Top-N Query](https://blog.fatalmind.com/2010/09/29/finding-the-best-match-with-a-top-n-query/) applies the same idea to "best match" searches.</Callout>
+
+## 5. Try it yourself
+
+SQLite uses `LIMIT`. Its sort shows up as `USE TEMP B-TREE FOR ORDER BY`; when an index supplies the order that line vanishes and the plan reads `SCAN sales USING INDEX`.
+
+<TryIt id="7.1" tasks={[
+  { text: 'Run the query as given. There is no index on <code>sale_date</code> yet, so the plan sorts all 20,000 rows before the first ten come out.', sql: 'order\\s+by\\s+sale_date\\s+desc[\\s\\S]*limit\\s+10', plan: 'TEMP B-TREE FOR ORDER BY' },
+  { text: 'Create an index on <code>sale_date</code> and run the query again. The temp b-tree is gone; the index is read backwards and the scan stops after ten entries.', sql: 'create\\s+index[\\s\\S]*\\(\\s*sale_date\\s*\\)' },
+  { text: 'Change the ORDER BY to <code>eur_value DESC</code>. The index cannot help and the sort returns.', sql: 'order\\s+by\\s+eur_value\\s+desc', plan: 'TEMP B-TREE FOR ORDER BY' },
+]} sql={`SELECT sale_id, sale_date, eur_value
+  FROM sales
+ ORDER BY sale_date DESC
+ LIMIT 10;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 2</summary><div class="d">After creating the index, run the SELECT once more; the plan belongs to the statement you ran last.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX sales&#95;date ON sales (sale&#95;date);
+SELECT sale&#95;id, sale&#95;date, eur&#95;value
+  FROM sales
+ ORDER BY sale&#95;date DESC
+ LIMIT 10;
+-- plan: SCAN sales USING INDEX sales&#95;date</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="A query has ORDER BY sale_date DESC and FETCH FIRST 10 ROWS ONLY. The plan shows SORT ORDER BY STOPKEY over a full table scan. What did the database do?"
+  options={[
+    'It read ten rows and stopped, because STOPKEY means an early exit.',
+    'It read the whole table but kept only the ten most recent rows in memory while sorting.',
+    'It read about half the table, until it had found ten rows newer than the rest.',
+  ]}
+  answer={1}
+  explain="A sort has to see every input row before it knows which one comes first, so the full scan runs to the end. STOPKEY on the sort means the database only materialized the ten rows it needed instead of the whole sorted result. That saves memory, not reads. Only a pipelined ORDER BY lets the query stop early."
+/>

@@ -1,0 +1,89 @@
+---
+title: "Unit check: Anatomy of an index"
+subtitle: Six questions on leaf nodes, the B-tree and the three steps of a lookup.
+chapter: anatomy
+order: 5
+kind: quiz
+minutes: 5
+summary: Six multiple-choice questions covering the leaf node chain, the balanced tree, logarithmic depth and the two ingredients of a slow index.
+prereqs: "Finish the three lessons and the practice set of this unit first."
+outcomes:
+  - Confirm that the structure of an index and the cost of a lookup have landed before moving on to the where clause
+recap:
+  - An index is a doubly linked list of sorted leaf nodes with a balanced tree on top. Lookups are three steps, and only the traversal is bounded.
+---
+import { Check } from '@/components/mdx';
+
+Six questions, one idea each. If an explanation surprises you, the lesson it names is the one to reread before unit 2.
+
+<Check
+  client:visible
+  question="What does CREATE INDEX do to the table it is created on?"
+  options={[
+    'It sorts the table by the indexed columns.',
+    'Nothing. It builds a separate structure holding a sorted copy of the indexed columns plus a pointer to each row.',
+    'It moves the indexed columns out of the table and into the index.',
+  ]}
+  answer={1}
+  explain="The table stays an unsorted heap. The index is pure redundancy beside it, which is why it takes its own disk space and why every row a query needs from the table still has to be fetched from there. See The leaf nodes."
+/>
+
+<Check
+  client:visible
+  question="Why are leaf nodes connected as a doubly linked list rather than stored one after another in key order?"
+  options={[
+    'Because a linked list is faster to search than an array.',
+    'So that an insert only changes one leaf and two links, instead of moving every entry that comes after it.',
+    'Because the database cannot allocate contiguous disk space.',
+  ]}
+  answer={1}
+  explain="The list separates logical order from physical position. A new leaf can go anywhere on disk and the links tie it into the sequence; nothing else moves. The list is not faster to search, which is why the tree exists. See The leaf nodes."
+/>
+
+<Check
+  client:visible
+  question="What does each entry in a branch node hold?"
+  options={[
+    'The smallest key of the child node and a pointer to it.',
+    'The largest key of the child node and a pointer to it.',
+    'A copy of every key in the child node.',
+  ]}
+  answer={1}
+  explain="A branch entry stores the biggest key of the node below it. The lookup follows the first entry whose key is greater than or equal to the search key, which rules out every child that cannot contain it. See The B-tree."
+/>
+
+<Check
+  client:visible
+  question="A real index on a table with ten million rows typically has a depth of"
+  options={[
+    'about ten levels, one per million rows.',
+    'three to five levels.',
+    'about 23 levels, since 2 to the 23rd is eight million.',
+  ]}
+  answer={1}
+  explain="A B-tree node holds hundreds of entries, so each level multiplies capacity by hundreds, not by two. Three to five levels cover anything from millions to hundreds of millions of entries; six is rare. The 23-level answer describes a binary tree, and balanced does not mean binary. See The B-tree."
+/>
+
+<Check
+  client:visible
+  question="Which of the three steps of an index lookup has an upper bound on the number of blocks it reads?"
+  options={[
+    'The tree traversal, bounded by the depth of the index.',
+    'The leaf chain walk, bounded by the number of leaves.',
+    'The table access, bounded by the number of table blocks.',
+  ]}
+  answer={0}
+  explain="Only the traversal is bounded, by the depth. The chain walk grows with the number of matching entries and the table access runs once per match; both can touch any number of blocks, and they are what makes an index slow. See Slow indexes, part I."
+/>
+
+<Check
+  client:visible
+  question="A query with an index is slow. A colleague proposes rebuilding the index. What does the unit say about that?"
+  options={[
+    'Rebuilding restores the balance of the tree and fixes the problem.',
+    'Rebuilding does not help in the long run. The tree is already balanced; the time goes into the leaf chain walk and the per-row table access.',
+    'Rebuilding helps only on Oracle.',
+  ]}
+  answer={1}
+  explain="A B-tree keeps itself balanced on every write and never degenerates. A slow index lookup is one that matches many entries and fetches many rows, and a rebuild changes neither. See Slow indexes, part I and the myth directory."
+/>

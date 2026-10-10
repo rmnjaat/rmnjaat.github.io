@@ -1,0 +1,39 @@
+---
+title: Most Selective First
+subtitle: Column order in a concatenated index is decided by the queries that use it, not by how many distinct values each column has.
+section: myth-directory
+order: 2
+summary: Why the rule to put the most selective column first in a multi-column index is wrong, how the queries decide the order, why equality columns go first and range columns last, where selectivity still matters, and the SQL Server statistics detail that keeps the myth alive.
+source: https://use-the-index-luke.com/sql/myth-directory/most-selective-first
+---
+import { Callout } from '@/components/mdx';
+
+The claim: in a multi-column index, put the column with the most distinct values first, because it narrows the search fastest.
+
+## Why people believe it
+
+It sounds like common sense: filtering on the column with a million distinct values before the one with three leaves fewer rows to check. The rule also appears in old tuning guides, and its numeric feel makes it easy to repeat.
+
+It is most persistent in the SQL Server world, where it even made it into the product documentation, and there is a technical reason for that. SQL Server keeps a histogram, the detailed picture of how values are distributed, only for the first column of an index. For the later columns the optimizer knows the number of distinct values and little else. So putting a column with a skewed distribution first does help the optimizer estimate better. That is a real effect, but it is about *unevenly distributed* columns, not about *selective* ones; a histogram on an evenly distributed column adds nothing the density figure did not already say. The advice survives because the two properties get mixed up.
+
+## What actually happens
+
+A concatenated index is sorted by its first column, then by the second within equal values of the first, and so on, like a phone book sorted by last name and then first name. The tree traversal can only use the leading columns that the where clause pins down. If a query filters on the second column alone, the index is sorted by something else first and the entries the query needs are scattered across all the leaves. Selectivity does not enter into it; the question is whether the query mentions the first column at all.
+
+Take the primary key of `employees`, `(employee_id, subsidiary_id)`. A query by `employee_id` and `subsidiary_id` uses the whole index either way round. A query by `subsidiary_id` alone uses the index only if `subsidiary_id` is the first column. So the order is decided by the second query, the one that filters on fewer columns, and the fact that `employee_id` has a thousand distinct values and `subsidiary_id` has three is irrelevant. The [concatenated keys lesson](/sql/where-clause/the-equals-operator/concatenated-keys/) builds this up from the structure of the leaf nodes.
+
+Sometimes the least selective column is the right first column for exactly that reason. Oracle even has an operation for the case where a query leaves out a leading column with very few distinct values: the `INDEX SKIP SCAN` runs one small range scan per distinct value of the missing column. It is an advanced feature and not something to design for, but it shows which way the engine is thinking: usability of the index across queries comes first, selectivity does not.
+
+Once the equality conditions have been placed, there is a second rule that selectivity also does not explain. Range conditions such as `sale_date BETWEEN` or `eur_value > 100` only use the index up to the first range column. Everything after it in the index becomes a filter predicate that the database checks entry by entry instead of using the tree. So the range column goes last, even when it is the most selective column in the query.
+
+## What to do instead
+
+Start from the queries, not from the statistics. Write down the where clauses that should use the index. Columns that appear with an equality condition in every one of those queries go first, in whatever order lets the largest number of queries use the index with their leading columns. Columns that appear in only some of the queries follow. A column that is compared with a range goes at the end, and if two columns are compared with ranges, only one of them will ever be an access predicate.
+
+Then check the plan. The [execution plan](/sql/explain-plan/) reference shows how each engine marks access predicates and filter predicates. If the equality condition shows up as a filter, the order is backwards.
+
+There is one place where selectivity really does decide: a query with two or more independent range conditions, `sale_date BETWEEN ... AND eur_value > ...` for instance. Only one of them can be an access predicate, and the one to choose is the one that leaves fewer rows to filter. That is the true core of the myth, and the [index merge lesson](/sql/where-clause/searching-for-ranges/index-merge-performance/) covers it.
+
+Authors who have spent a career on this agree. Guy Harrison, in the Oracle Performance Survival Guide, warns against automatically leading with the most selective term. Jonathan Lewis files the rule among the fairy tales about indexes and notes it was never sensible, except possibly before Oracle 6. Gail Shaw, writing about SQL Server, points out that a highly selective leading column is useless when hardly any query filters on it, because the other queries have to scan.
+
+<Callout kind="note">Selectivity still matters for a different decision: whether an index helps at all. An index on `subsidiary_id` alone, with subsidiary 20 holding half the rows, is nearly useless for that value. That is a reason to index a different column, not a reason to reorder this one.</Callout>

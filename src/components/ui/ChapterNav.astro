@@ -1,0 +1,59 @@
+---
+import { chapters, referenceSections } from '../../lib/site';
+import { getOrderedLessons, toNavItem } from '../../lib/nav';
+interface Props { currentId?: string; currentChapter?: string }
+const { currentId, currentChapter } = Astro.props;
+const lessons = await getOrderedLessons();
+const byChapter = new Map<string, ReturnType<typeof toNavItem>[]>();
+for (const c of chapters) byChapter.set(c.slug, []);
+for (const l of lessons) byChapter.get(l.data.chapter)?.push(toNavItem(l));
+const typeLabel = (it: ReturnType<typeof toNavItem>) => it.kind === 'lesson' ? `${it.minutes} min` : it.kind;
+---
+<button class="btn tree-toggle" type="button" id="tree-toggle" aria-expanded="false" aria-controls="chapter-nav">☰ Course outline</button>
+<nav class="tree" aria-label="Course outline" id="chapter-nav">
+  {chapters.map((c) => {
+    const items = byChapter.get(c.slug) ?? [];
+    const single = items.length === 1 && items[0].id === c.slug;
+    if (single) {
+      const it = items[0];
+      return <div class="unit open"><ol style="padding-left:0"><li data-id={it.id} class={`t-${it.kind}`}><a href={it.href} aria-current={currentId === it.id ? 'page' : undefined}><span class="ic" aria-hidden="true"></span><span>{c.n} · {c.title}</span><span class="ty">{typeLabel(it)}</span></a></li></ol></div>;
+    }
+    return (
+      <div class={`unit ${c.slug === currentChapter ? 'open' : ''}`} data-unit={c.slug}>
+        <button type="button" aria-expanded={c.slug === currentChapter ? 'true' : 'false'}><span class="n">{c.n}</span><span>{c.title}</span><span class="pct" data-unit-pct={c.slug}>0/{items.length}</span><span class="chev" aria-hidden="true"></span></button>
+        <ol>
+          <li data-depth="1" class="t-lesson"><a href={`/sql/${c.slug}/`} aria-current={currentId === c.slug ? 'page' : undefined}><span class="ic" aria-hidden="true" style="border:0"></span><span style="color: var(--mute)">Overview</span><span></span></a></li>
+          {items.map((it) => (
+            <li data-id={it.id} data-depth={String(it.depth)} class={`t-${it.kind}`}>
+              <a href={it.href} aria-current={currentId === it.id ? 'page' : undefined}><span class="ic" aria-hidden="true"></span><span>{it.title}</span><span class="ty">{typeLabel(it)}</span></a>
+            </li>
+          ))}
+        </ol>
+      </div>
+    );
+  })}
+  <div class="ref">
+    {referenceSections.map((s) => <a href={`/sql/${s.slug}/`} aria-current={currentChapter === s.slug ? 'page' : undefined}>{s.title}</a>)}
+    <a href="/playground/">Playground</a>
+  </div>
+</nav>
+<script>
+  import { getDone } from '../../lib/prefs';
+  const nav = document.getElementById('chapter-nav');
+  const paint = () => {
+    const done = getDone();
+    nav?.querySelectorAll<HTMLElement>('li[data-id]').forEach((li) => li.classList.toggle('done', done.has(li.dataset.id!)));
+    nav?.querySelectorAll<HTMLElement>('.unit[data-unit]').forEach((u) => {
+      const items = [...u.querySelectorAll<HTMLElement>('li[data-id]')];
+      const n = items.filter((li) => done.has(li.dataset.id!)).length;
+      const pct = u.querySelector('[data-unit-pct]'); if (pct) pct.textContent = `${n}/${items.length}`;
+    });
+  };
+  paint();
+  window.addEventListener('util:done', paint);
+  nav?.querySelectorAll<HTMLButtonElement>('.unit > button').forEach((b) => b.addEventListener('click', () => {
+    const u = b.parentElement!; const open = u.classList.toggle('open'); b.setAttribute('aria-expanded', String(open));
+  }));
+  const toggle = document.getElementById('tree-toggle');
+  toggle?.addEventListener('click', () => { const open = nav?.classList.toggle('open'); toggle.setAttribute('aria-expanded', String(!!open)); });
+</script>

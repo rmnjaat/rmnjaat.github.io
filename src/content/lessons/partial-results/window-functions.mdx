@@ -1,0 +1,240 @@
+---
+title: Window Functions for Pagination
+subtitle: ROW_NUMBER numbers the sorted rows and a range filter picks a page. It is standard SQL and runs everywhere, but only some engines know to stop once the page is full.
+chapter: partial-results
+order: 3
+kind: lesson
+minutes: 8
+summary: How ROW_NUMBER() OVER (ORDER BY ...) in a subquery fetches a page, which engines turn it into a pipelined top-N query and which read the whole index, the Db2 double-wrap workaround, the PostgreSQL 15 run condition, and the support matrix for functions and PARTITION BY.
+prereqs: "You should have read <a href='/sql/partial-results/fetch-next-page/'>Fetching the Next Page</a>; this lesson is the third way to page, and the one to compare against the other two."
+outcomes:
+  - How a ROW_NUMBER subquery with a range filter fetches a page
+  - Which engines abort the index scan after the page and which number every row
+  - How Db2 can be coaxed into stopping early by wrapping the query twice
+  - What PostgreSQL's run condition and Oracle's WINDOW NOSORT STOPKEY mean
+  - Which functions and clauses keep the optimisation, and why PARTITION BY can disable it
+recap:
+  - ROW_NUMBER() OVER (ORDER BY ...) in a subquery plus WHERE rn BETWEEN 11 AND 20 is a standards-compliant way to fetch a page.
+  - Three engines stop once the page is full, SQL Server, Oracle and PostgreSQL from release 15. MySQL, MariaDB and Db2 LUW number every row in the index.
+  - On Db2, wrapping the query twice, rn <= 20 inside and rn > 10 outside, gets the early abort back.
+  - The optimisation is centred on ROW_NUMBER; RANK, DENSE_RANK and COUNT are supported less widely, and a PARTITION BY can switch it off even when the where clause selects a single partition.
+  - Window functions are for analytics first. For paging, prefer FETCH FIRST and the seek method where the engine supports them.
+source: https://use-the-index-luke.com/sql/partial-results/window-functions
+---
+import { Callout, KeyIdea, Figure, EngineTabs, Check, TryIt } from '@/components/mdx';
+
+There is a third way to fetch a page, and it is the most portable one: number the sorted rows with a window function and filter on the number. It is flexible and it is standard SQL. The catch is execution. Three engines stop once the page is full, SQL Server, Oracle and PostgreSQL from release 15; MySQL, MariaDB and Db2 LUW keep reading the index after the page is complete and pay for every row in the table.
+
+## 1. Numbering the rows
+
+`ROW_NUMBER()` assigns consecutive numbers to the rows in the order given by its `OVER` clause. Put it in a subquery and filter on the number outside. The second page of ten:
+
+```sql
+SELECT *
+  FROM ( SELECT sales.*
+              , ROW_NUMBER() OVER (ORDER BY sale_date DESC
+                                          , sale_id   DESC) rn
+           FROM sales
+       ) tmp
+ WHERE rn between 11 and 20
+ ORDER BY sale_date DESC, sale_id DESC
+```
+
+The window's `ORDER BY` is a sort like any other, and the same index that makes a top-N query pipelined, `sl_dtid` on `(sale_date, sale_id)`, feeds the numbering in order without a sort. The open question is what happens after row 20. The outer filter can never match row 21 or anything later, because row numbers only go up. An optimizer that knows this stops the scan. One that does not numbers all million rows and then discards all but ten.
+
+<KeyIdea>The index removes the sort on every engine. Stopping after row 20 is a separate optimisation, and not every engine has it.</KeyIdea>
+
+## 2. Who stops and who does not
+
+<EngineTabs>
+  <Fragment slot="oracle">
+  Oracle sees that nothing past row 20 can pass the filter and runs the statement as a pipelined top-N query over the index.
+  ```
+  ---------------------------------------------------------------
+  |Id | Operation                      | Name    | Rows |  Cost |
+  ---------------------------------------------------------------
+  | 0 | SELECT STATEMENT               |         | 1004K| 36877 |
+  |*1 |  VIEW                          |         | 1004K| 36877 |
+  |*2 |   WINDOW NOSORT STOPKEY        |         | 1004K| 36877 |
+  | 3 |    TABLE ACCESS BY INDEX ROWID | SALES   | 1004K| 36877 |
+  | 4 |     INDEX FULL SCAN DESCENDING | SL_DTID | 1004K|  2955 |
+  ---------------------------------------------------------------
+
+  Predicate Information (identified by operation id):
+  ---------------------------------------------------
+  1 - filter("RN">=11 AND "RN"<=20)
+  2 - filter(ROW_NUMBER() OVER (
+             ORDER BY "SALE_DATE" DESC, "SALE_ID" DESC )<=20)
+  ```
+  `WINDOW NOSORT STOPKEY` says two things: there is no sort (`NOSORT`) and the execution aborts at the upper threshold (`STOPKEY`). Everything below the stop point is pipelined, so this costs the same as `OFFSET` paging in the previous lesson, no more and no less.
+  </Fragment>
+  <Fragment slot="db2">
+  Db2 LUW 10.5 avoids the sort but does not execute the query as a top-N query. It reads the entire index and filters afterwards.
+  ```
+  Explain Plan
+  -------------------------------------------------------------
+  ID | Operation                   |               Rows |  Cost
+   1 | RETURN                      |                    | 65658
+   2 |  FILTER                     |  100933 of 1009326 | 65658
+   3 |   FETCH SALES               | 1009326 of 1009326 | 65295
+   4 |    IXSCAN (REVERSE) SL_DTID | 1009326 of 1009326 |  5679
+
+  Predicate Information
+   2 - RESID (11 <= Q3.$C8)
+       RESID (Q3.$C8 <= 20)
+  ```
+  To get a proper abort after 20 rows, wrap the query twice: the inner query applies the top-N condition `rn <= 20`, the outer one removes the first ten.
+  ```sql
+  SELECT *
+    FROM (SELECT *
+            FROM (SELECT sales.*
+                       , ROW_NUMBER() OVER (ORDER BY sale_date DESC
+                                                   , sale_id   DESC) rn
+                   FROM sales
+                 ) tmp
+           WHERE rn <= 20
+         ) tmp2
+   WHERE rn > 10
+   ORDER BY sale_date DESC, sale_id DESC;
+  ```
+  ```
+  Explain Plan
+  -----------------------------------------------------------------
+  ID | Operation                       |               Rows |  Cost
+   1 | RETURN                          |                    |    21
+   2 |  FILTER                         |            7 of 20 |    21
+   3 |   FETCH SALES                   |      20 of 1009326 | 65352
+   4 |    IXSCAN (REVERSE) SL_DTID     | 1009326 of 1009326 |  5736
+
+  Predicate Information
+   2 - RESID (10 < Q3.$C8)
+  ```
+  The filter `rn <= 20` is not listed in the predicate section, yet the row estimate of 20 shows it is applied.
+  </Fragment>
+  <Fragment slot="postgresql">
+  Since version 15 the plan shows a **run condition**, which lets the window node stop the scan below it once the condition can no longer be met.
+  ```
+                       QUERY PLAN
+  -------------------------------------------------------
+   Subquery Scan on tmp
+      (cost=0.42..141724.98 rows=334751 width=249)
+      (actual time=0.040..0.052 rows=10 loops=1)
+   Filter: (tmp.rn >= 11)
+   Rows Removed by Filter: 10
+   Buffers: shared hit=5
+   -> WindowAgg
+         (cost=0.42..129171.80 rows=1004254 width=249)
+         (actual time=0.028..0.049 rows=20 loops=1)
+      Run Condition: (row_number() OVER (?) <= 20)
+      Buffers: shared hit=5
+      -> Index Scan Backward using sl_dtid on sales
+             (cost=0.42..111597.36 rows=1004254 width=241)
+             (actual time=0.018..0.025 rows=22 loops=1)
+         Buffers: shared hit=5
+  ```
+  The index scan actually returned 22 rows and the window 20, from a table of a million. Releases before 15 have no run condition and number every row.
+  </Fragment>
+  <Fragment slot="sql-server">
+  SQL Server reads the index in order, computes the numbers, and stops once the page is complete, provided the function is `ROW_NUMBER()`. Since 2012, `OFFSET ... FETCH` expresses the same thing natively.
+  </Fragment>
+  <Fragment slot="mysql">
+  MySQL has window functions since 8.0 and MariaDB since 10.2. Neither aborts the index scan after the page: the window runs to the end of the table before the outer filter is applied. Use `LIMIT` with the seek method instead.
+  </Fragment>
+  <Fragment slot="sqlite">
+  SQLite has window functions since 3.25. The plan shows a co-routine that scans the whole index; the filter on `rn` is applied afterwards, so there is no early abort.
+  </Fragment>
+</EngineTabs>
+
+## 3. Support across products
+
+The optimisation is far from universal, and it has arrived at different times.
+
+<Figure n="7.5" title="Pipelined top-N with window functions, by product and release">
+
+| Product | Releases | Status |
+| --- | --- | --- |
+| SQL Server | 2008 R2 to 2025 | partial, only with ROW_NUMBER() |
+| Oracle | 11gR1 to 11gR2 | partial |
+| Oracle | 12cR1 to 23 | partial, not with PARTITION BY |
+| PostgreSQL | 9.0 to 14 | none |
+| PostgreSQL | 15 to 16 | partial, not with PARTITION BY |
+| PostgreSQL | 17 to 18 | full |
+| MySQL | 8.0.18 onwards | none |
+| MariaDB | 10.2 onwards | none |
+
+<p slot="caption">"Partial" means the abort works for some functions or clauses only; see the two tables below.</p>
+</Figure>
+
+In principle the optimisation could work with any monotonic function, but the implementations concentrate on `ROW_NUMBER`.
+
+<Figure n="7.6" title="Which functions keep the early abort">
+
+| | MariaDB | MySQL | Oracle | PostgreSQL | SQL Server |
+| --- | --- | --- | --- | --- | --- |
+| ROW_NUMBER() | no | no | yes | yes | yes |
+| RANK() | no | no | only with a where clause on the partition | yes | no |
+| DENSE_RANK() | no | no | no | yes | no |
+| COUNT(...) | no | no | no | yes | no |
+
+<p slot="caption">Latest releases at the time of the original survey: MariaDB 12.3, MySQL 26.7, Oracle 23, PostgreSQL 18, SQL Server 2025.</p>
+</Figure>
+
+`PARTITION BY` deserves extra care. In some products its mere presence disables the optimisation, even when the where clause restricts the rows to a single partition. That happens easily when the partitioned window function lives in a view and the outer query filters the view down to one partition.
+
+<Figure n="7.7" title="Which clauses keep the early abort">
+
+| | MariaDB | MySQL | Oracle | PostgreSQL | SQL Server |
+| --- | --- | --- | --- | --- | --- |
+| OVER(ORDER BY ...) | no | no | partial | yes | yes |
+| OVER(ORDER BY ...) + WHERE x = ? | no | no | yes | yes | yes |
+| OVER(PARTITION BY x ORDER BY ...) + WHERE x = ? | no | no | no | yes | yes |
+
+<p slot="caption">For Oracle, "partial" means not every function that works with a where clause also works without one.</p>
+</Figure>
+
+<Callout kind="warning" title="Common mistake">Expecting the window function to behave like `FETCH FIRST` because the plan shows no sort. The absence of a sort only says the index supplied the order. Whether the scan stops after the page is a separate question, and on MySQL, MariaDB and Db2 the answer is no.</Callout>
+
+## 4. Where window functions belong
+
+Pagination is not what window functions are good at. Their strength is analytical calculation, running totals, rankings within groups, comparisons with the previous row, and if you have never used them it is worth a few hours with the documentation: [Oracle](https://docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/Analytic-Functions.html), [PostgreSQL](https://www.postgresql.org/docs/current/tutorial-window.html), [SQL Server](https://learn.microsoft.com/en-us/sql/t-sql/queries/select-over-clause-transact-sql?view=sql-server-ver16). For paging, reach for `FETCH FIRST` and the [seek method](/sql/partial-results/fetch-next-page/) first, and for `ROW_NUMBER` when the same SQL has to run on an engine without them.
+
+<Callout kind="note">A `ROW_NUMBER` range filter is still an offset in disguise. Page 500 is rows 4,991 to 5,000, and even an engine that stops early numbers the first 4,990. Combine the window function with a seek condition in the where clause to avoid that.</Callout>
+
+## 5. Try it yourself
+
+The playground has `sales_date_id` on `(sale_date, sale_id)`. SQLite shows the subquery as a `CO-ROUTINE`. With the index the inner scan reads `SCAN sales USING INDEX sales_date_id` and needs no temp b-tree for the window; the single temp b-tree in the plan belongs to the outer `ORDER BY rn` over ten rows.
+
+<TryIt id="7.3" setup={`CREATE INDEX sales_date_id ON sales (sale_date, sale_id);`} tasks={[
+  { text: 'Run the query as given. Find <code>SCAN sales USING INDEX sales_date_id</code> inside the co-routine: the index feeds the numbering in order.', sql: 'row_number\\s*\\(\\s*\\)\\s*over', plan: 'SCAN sales USING INDEX sales_date_id' },
+  { text: 'Change the window to <code>OVER (ORDER BY eur_value DESC)</code>. The inner scan is now a plain <code>SCAN sales</code> followed by a temp b-tree: the numbering had to be sorted.', sql: 'over\\s*\\(\\s*order\\s+by\\s+eur_value\\s+desc', plan: 'SCAN sales\\s+USE TEMP B-TREE FOR ORDER BY' },
+  { text: 'Restore the window and wrap the query twice, Db2-style: <code>rn &lt;= 20</code> in the inner query and <code>rn &gt; 10</code> outside. Same ten rows.', sql: 'rn\\s*<=\\s*20[\\s\\S]*rn\\s*>\\s*10' },
+]} sql={`SELECT sale_id, sale_date, eur_value
+  FROM (SELECT sale_id, sale_date, eur_value,
+               ROW_NUMBER() OVER (ORDER BY sale_date DESC, sale_id DESC) AS rn
+          FROM sales) numbered
+ WHERE rn BETWEEN 11 AND 20
+ ORDER BY rn;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 3</summary><div class="d">The inner filter is the top-N condition; the outer one skips the first page. Keep the alias rn visible in both levels.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT sale&#95;id, sale&#95;date, eur&#95;value
+  FROM (SELECT &#42;
+          FROM (SELECT sale&#95;id, sale&#95;date, eur&#95;value,
+                       ROW&#95;NUMBER() OVER (ORDER BY sale&#95;date DESC, sale&#95;id DESC) AS rn
+                  FROM sales) numbered
+         WHERE rn &lt;= 20) page
+ WHERE rn &gt; 10
+ ORDER BY rn;</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="A page is fetched with ROW_NUMBER() in a subquery and WHERE rn BETWEEN 11 AND 20. The ORDER BY columns are indexed. Is the query guaranteed to stop after twenty rows?"
+  options={[
+    'Yes. The index delivers the order, so the database stops at row twenty like it does for FETCH FIRST.',
+    'No. Whether the scan stops depends on the engine; MySQL, MariaDB and Db2 number every row before the filter runs.',
+    'No. Window functions always sort the whole table, even with an index.',
+  ]}
+  answer={1}
+  explain="The index removes the sort on every engine. Stopping early is a separate optimisation: the optimizer must notice that the filter on the row number can never match past twenty. SQL Server, Oracle and PostgreSQL 15 and later do this; MySQL, MariaDB and Db2 LUW read the whole index. FETCH FIRST and the seek method avoid the question."
+/>

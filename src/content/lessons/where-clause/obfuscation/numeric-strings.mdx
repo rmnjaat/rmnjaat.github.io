@@ -1,0 +1,145 @@
+---
+title: Numeric Strings
+subtitle: Numbers stored in text columns are a bad idea, but they do not break an index on their own. Comparing them with a number does, because the database converts the column, not the number.
+chapter: where-clause
+order: 7.2
+kind: lesson
+minutes: 7
+summary: Why numeric_string = 42 cannot use an index while numeric_string = '42' can, which side the database converts and why, how the databases differ, why the two spellings differ in meaning as well as speed, and why the reverse case is harmless unless you convert by hand.
+prereqs: "You should know why a <a href='/sql/where-clause/functions/'>function on an indexed column</a> prevents the index from being used."
+outcomes:
+  - Why a numeric string compared with a string uses the index and compared with a number does not
+  - Which side the implicit conversion lands on and why the database chooses that side
+  - What each database does with the mismatch
+  - Why the two spellings can return different rows
+  - Why numeric_number = '42' is fine and TO_CHAR(numeric_number) = '42' is not
+recap:
+  - A text column compared with a text value uses its index. Compared with a number, the column is converted and the index is out.
+  - Databases convert the string to a number because that is unambiguous; a number can be written as text in many ways.
+  - CAST(numeric_string AS INT) = 42 matches 42, 042 and 0042; numeric_string = CAST(42 AS VARCHAR) matches one of them. The variants differ in meaning, not only in speed.
+  - Numeric strings risk conversion errors from a single bad value. Store numbers in numeric columns.
+  - A numeric column compared with a string is converted on the string side and keeps its index.
+source: https://use-the-index-luke.com/sql/where-clause/obfuscation/numeric-strings
+---
+import { Callout, KeyIdea, Figure, Check, TryIt } from '@/components/mdx';
+
+A numeric string is a number kept in a text column. It is bad practice, but it does not make an index useless by itself. As long as the column is consistently treated as text, the index works.
+
+## 1. Same column, two comparisons
+
+```sql
+SELECT ...
+  FROM ...
+ WHERE numeric_string = '42'
+```
+
+This can use an index on `NUMERIC_STRING`. Drop the quotes and it cannot:
+
+```sql
+SELECT ...
+  FROM ...
+ WHERE numeric_string = 42
+```
+
+Some databases, PostgreSQL among them, reject the statement with an error. Many others silently add a type conversion, so the condition they actually execute is this:
+
+```sql
+SELECT ...
+  FROM ...
+ WHERE CAST(numeric_string AS INT) = 42
+```
+
+It is the function-on-the-column problem again: the index on `NUMERIC_STRING` holds strings, and the condition is on numbers made from them. The condition cannot be an [access predicate](/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates/).
+
+## 2. Convert the search term, not the column
+
+The fix is the same as always: leave the column alone and convert the other side.
+
+```sql
+SELECT ...
+  FROM ...
+ WHERE numeric_string = CAST(42 AS VARCHAR(10))
+```
+
+Why does the database not do this by itself? Because converting a string to a number has one unambiguous result, while converting a number to a string does not. A number written as text can carry spaces, punctuation and leading zeros. One value, many spellings:
+
+```
+42
+042
+0042
+00042
+...
+```
+
+Since the database has no way of knowing which spelling the `NUMERIC_STRING` column uses, it takes the only safe route and turns the strings into numbers, where every spelling collapses to one value.
+
+That also means the two spellings mean different things. `CAST AS VARCHAR` produces one string and matches only the first spelling in the list. `CAST AS INT` matches all of them. The difference is not only in performance; it is in the result.
+
+## 3. What each database does
+
+<Figure n="2.10" title="How the databases handle numeric_string = 42">
+
+| Behaviour | Databases |
+| --- | --- |
+| No implicit conversion: type error | BigQuery, PostgreSQL |
+| Converts the column: `CAST(numeric_string AS INT) = 42` | Db2 (LUW), MariaDB, MySQL, Oracle, SQL Server |
+| Converts the number: `numeric_string = CAST(42 AS VARCHAR)` | SQLite |
+
+<p slot="caption">Only SQLite converts the search term, because its column affinity rules apply the column's type to the literal. The second group loses the index; the first group refuses to run the statement.</p>
+</Figure>
+
+Numeric strings are trouble beyond performance. Besides the implicit conversion, there is the risk of conversion errors from invalid numbers: a single bad value in the table can abort even the most innocent query, one with no function anywhere in its where clause.
+
+<KeyIdea title="Tip">Use numeric types to store numbers.</KeyIdea>
+
+## 4. The other way round
+
+The problem does not exist in the opposite direction:
+
+```sql
+SELECT ...
+  FROM ...
+ WHERE numeric_number = '42'
+```
+
+Here the string is converted to a number, consistently, and no function lands on the potentially indexed column. A regular index works. You can still get it wrong by hand:
+
+```sql
+SELECT ...
+  FROM ...
+ WHERE TO_CHAR(numeric_number) = '42'
+```
+
+<Callout kind="warning" title="Common mistake">Trusting that a condition "without a function" is safe. The function is there; the database added it. If an indexed column shows up inside `CAST`, `TO_NUMBER`, `CONVERT` or `INTERNAL_FUNCTION` in the plan, check the type of the value on the other side, and the type your driver or ORM binds.</Callout>
+
+## 5. Try it
+
+The `phone_number` column is text, and the playground indexes it. SQLite is the one database that converts the search term, so `phone_number = 43` uses the index there; to see what Oracle, SQL Server and the others do, the first query spells the conversion out.
+
+<TryIt id="2.7.2" tasks={[
+  { text: 'Run the query with the explicit <code>CAST</code> on the column. The plan is a <code>SCAN</code>, and because SQLite reads a leading <code>+43</code> as 43, every one of the 1,000 rows matches.', sql: 'cast\\(phone_number\\s+as\\s+integer\\)', plan: '^SCAN employees' },
+  { text: 'Compare text with text: <code>phone_number = \'+43 1 000 1000\'</code>. One row, and the plan uses <code>emp_phone</code>.', sql: "phone_number\\s*=\\s*'\\+43 1 000 1000'", plan: 'USING (COVERING )?INDEX emp_phone \\(phone_number=\\?\\)' },
+  { text: 'Now the reverse case: <code>employee_id = \'42\'</code>, a string against a numeric column. The primary key index is still used.', sql: "employee_id\\s*=\\s*'42'", plan: 'sqlite_autoindex_employees_1 \\(employee_id=\\?\\)' },
+]} setup={`CREATE INDEX emp_phone ON employees (phone_number); ANALYZE;`} sql={`SELECT employee_id, phone_number
+  FROM employees
+ WHERE CAST(phone_number AS INTEGER) = 43;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 1</summary><div class="d">The index stores the phone numbers as text. A condition on the numbers made from them cannot be looked up in it, so every row is read and converted.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT employee&#95;id, phone&#95;number FROM employees WHERE phone&#95;number = '+43 1 000 1000';
+-- plan: SEARCH employees USING INDEX emp&#95;phone (phone&#95;number=?)
+SELECT employee&#95;id, phone&#95;number FROM employees WHERE employee&#95;id = '42';
+-- plan: SEARCH employees USING INDEX sqlite&#95;autoindex&#95;employees&#95;1 (employee&#95;id=?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="numeric_string is a VARCHAR column with an index. Why can WHERE numeric_string = 42 not use it in Oracle?"
+  options={[
+    'Indexes on VARCHAR columns never support equality conditions.',
+    'Oracle converts the column to a number for every row, which is a function on the indexed column.',
+    'Oracle converts 42 to a string, and the index only stores numbers.',
+  ]}
+  answer={1}
+  explain="Converting a string to a number is unambiguous, converting a number to a string is not, so the database converts the column side. Every row is converted before it can be compared, and the index on the stored strings is useless. Pass a string, or CAST the number, and the column is compared as stored."
+/>

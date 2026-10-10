@@ -1,0 +1,291 @@
+---
+title: Indexed ORDER BY
+subtitle: A sort has to see its last input row before it can hand out the first. An index that is already in the right order makes the sort disappear, and the query becomes a pipeline.
+chapter: sorting-grouping
+order: 1
+kind: lesson
+minutes: 11
+summary: "The third power of indexing: how an index that matches the ORDER BY lets the database skip the sort, why the where clause decides whether the scanned range is in order, what the cost value hides, and how to find out why a sort is still there."
+prereqs: "You should know how a <a href='/sql/where-clause/searching-for-ranges/'>range scan</a> walks the leaf chain and how the column order of a <a href='/sql/where-clause/the-equals-operator/concatenated-keys/'>concatenated index</a> decides what is adjacent."
+outcomes:
+  - Why a sort cannot be pipelined and what that costs on large results
+  - How an index that covers both the where clause and the ORDER BY removes the sort operation
+  - Why only the scanned index range has to be in order, and how a range condition breaks that
+  - Why the cost value can go up when the plan gets simpler
+  - A two-step test that tells you why the database still sorts
+recap:
+  - A sort needs every input row before it emits the first. Reading an index in order makes the sort disappear and the execution pipelined, which is the third power of indexing.
+  - The index that serves the where clause must also deliver the ORDER BY order. Only the scanned range has to be sorted, so an equality on the leading column plus the sort columns after it is enough.
+  - A range condition on a column before the sort column leaves the scanned range ordered by that column instead. The sort comes back.
+  - Cost values can rise when the sort goes, because a wider index has a worse clustering factor. Cost is an estimate, not a stopwatch.
+  - To find out why a sort is still there, spell the whole index column list out as the ORDER BY. If the sort stays, the optimizer chose it for cost; if it goes, the index order did not match.
+source: https://use-the-index-luke.com/sql/sorting-grouping/indexed-order-by
+---
+import { Callout, KeyIdea, Figure, EngineTabs, Check, TryIt } from '@/components/mdx';
+
+Sorting is the kind of work a database cannot hide. It burns CPU, but the real problem is memory: a sort must read its whole input before it can emit a single row, so the entire intermediate result has to be buffered somewhere. Nothing about a sort is pipelined, and for a large result that is exactly the wrong property. An index, on the other hand, stores its entries presorted. Reading the index in order gives the database a sorted result for free, and this lesson is about making that happen.
+
+## 1. The third power of indexing
+
+An index is sorted exactly as if you had written its column list into an `ORDER BY` clause. [Unit 1](/sql/anatomy/) showed the leaf nodes as a sorted, doubly linked chain. If the leaves are already in the order the query wants, the database can walk the chain and skip the sort operation entirely.
+
+Skipping the sort is the smaller half of the gain. The larger half is that the first row leaves the database as soon as it has been found, without waiting for the last one. The `ORDER BY` executes as a pipeline. [Unit 7](/sql/partial-results/) builds efficient paging on that property, which is why it earns a name of its own.
+
+<Callout kind="note" title="The three powers of indexing">The [B-tree traversal](/sql/anatomy/the-tree/) is the first power. [Clustering](/sql/clustering/) is the second. The pipelined `ORDER BY` is the third.</Callout>
+
+There is a catch the optimizer has to weigh. An index range scan followed by a table access per row gets expensive for large results, and that can eat the saving from the avoided sort. A full table scan with an explicit sort is sometimes the faster plan. Choosing between them is the optimizer's job; yours is to make the pipelined plan possible.
+
+## 2. The sort shows up in the plan
+
+Take yesterday's sales, ordered by date and product.
+
+```sql
+SELECT sale_date, product_id, quantity
+  FROM sales
+ WHERE sale_date = TRUNC(sysdate) - INTERVAL '1' DAY
+ ORDER BY sale_date, product_id
+```
+
+There is an index on `sale_date`, and the where clause uses it. The `ORDER BY` is another matter: the rows come out of the index in date order, but within the day they are in no particular product order, so the database has to sort them.
+
+<EngineTabs>
+  <Fragment slot="db2">
+  ```
+  Explain Plan
+  ------------------------------------------------------------
+  ID | Operation             |                     Rows | Cost
+   1 | RETURN                |                          |  682
+   2 |  TBSCAN               |     394 of 394 (100.00%) |  682
+   3 |   SORT                |     394 of 394 (100.00%) |  682
+   4 |    FETCH SALES        |     394 of 394 (100.00%) |  682
+   5 |     IXSCAN SALES_DATE | 394 of 1009326 (   .04%) |   19
+
+  Predicate Information
+   5 - START (Q1.SALE_DATE = (CURRENT DATE - 1 DAYS))
+        STOP (Q1.SALE_DATE = (CURRENT DATE - 1 DAYS))
+  ```
+  The where clause was written as `WHERE sale_date = CURRENT DATE - 1 DAY` for Db2. The `SORT` between `FETCH` and `RETURN` is the operation to get rid of.
+  </Fragment>
+  <Fragment slot="oracle">
+  ```
+  ---------------------------------------------------------------
+  |Id | Operation                    | Name       | Rows | Cost |
+  ---------------------------------------------------------------
+  | 0 | SELECT STATEMENT             |            |  320 |   18 |
+  | 1 |  SORT ORDER BY               |            |  320 |   18 |
+  | 2 |   TABLE ACCESS BY INDEX ROWID| SALES      |  320 |   17 |
+  |*3 |    INDEX RANGE SCAN          | SALES_DATE |  320 |    3 |
+  ---------------------------------------------------------------
+  ```
+  `SORT ORDER BY` is the explicit sort.
+  </Fragment>
+  <Fragment slot="postgresql">
+  ```
+  Sort
+    Sort Key: sale_date, product_id
+    ->  Index Scan using sales_date on sales
+          Index Cond: (sale_date = (CURRENT_DATE - 1))
+  ```
+  A `Sort` node above the index scan. `EXPLAIN ANALYZE` adds `Sort Method`, and `external merge` there means the sort spilled to disk.
+  </Fragment>
+  <Fragment slot="mysql">
+  ```
+            key: sales_date
+            ref: const
+          Extra: Using filesort
+  ```
+  `Using filesort` means a sort, whether it ran in memory or on disk.
+  </Fragment>
+  <Fragment slot="sql-server">
+  ```
+  |--Sort(ORDER BY:([sale_date] ASC, [product_id] ASC))
+       |--Nested Loops(Inner Join)
+            |--Index Seek(OBJECT:([sales].[sales_date]), SEEK:([sale_date]=...) ORDERED FORWARD)
+            |--Clustered Index Seek(OBJECT:([sales].[sales_pk]) LOOKUP ORDERED FORWARD)
+  ```
+  </Fragment>
+</EngineTabs>
+
+## 3. Extend the index to match the ORDER BY
+
+A range scan already returns entries in index order. The only thing missing is that the index order and the `ORDER BY` do not agree past the first column. Make them agree.
+
+```sql
+DROP INDEX sales_date;
+
+CREATE INDEX sales_dt_pr ON sales (sale_date, product_id);
+```
+
+Same query, new plans.
+
+<EngineTabs>
+  <Fragment slot="db2">
+  ```
+  Explain Plan
+  -----------------------------------------------------------
+  ID | Operation            |                     Rows | Cost
+   1 | RETURN               |                          |  688
+   2 |  FETCH SALES         |     394 of 394 (100.00%) |  688
+   3 |   IXSCAN SALES_DT_PR | 394 of 1009326 (   .04%) |   24
+
+  Predicate Information
+   3 - START (Q1.SALE_DATE = (CURRENT DATE - 1 DAYS))
+        STOP (Q1.SALE_DATE = (CURRENT DATE - 1 DAYS))
+  ```
+  </Fragment>
+  <Fragment slot="oracle">
+  ```
+  ---------------------------------------------------------------
+  |Id | Operation                   | Name        | Rows | Cost |
+  ---------------------------------------------------------------
+  | 0 | SELECT STATEMENT            |             |  320 |  300 |
+  | 1 |  TABLE ACCESS BY INDEX ROWID| SALES       |  320 |  300 |
+  |*2 |   INDEX RANGE SCAN          | SALES_DT_PR |  320 |    4 |
+  ---------------------------------------------------------------
+  ```
+  </Fragment>
+  <Fragment slot="postgresql">
+  ```
+  Index Scan using sales_dt_pr on sales
+    Index Cond: (sale_date = (CURRENT_DATE - 1))
+  ```
+  Nothing in the plan says "ordered". The missing `Sort` node is the evidence.
+  </Fragment>
+  <Fragment slot="mysql">
+  ```
+            key: sales_dt_pr
+            ref: const
+          Extra: NULL
+  ```
+  </Fragment>
+  <Fragment slot="sql-server">
+  The `Sort` operator is gone and the `Index Seek` uses `sales_dt_pr`. The key lookup stays until `quantity` is in the index as well.
+  </Fragment>
+</EngineTabs>
+
+The query still has its `ORDER BY`, but the sort operation has left the plan. The database reads the entries in index order and passes them straight through.
+
+<KeyIdea>When the index order matches the `ORDER BY`, the database can leave out the sort. The index that finds the rows must be the same index that orders them.</KeyIdea>
+
+### The cost went up
+
+Look at the Oracle cost column: 18 with the sort, 300 without it. Fewer operations, higher estimate. The reason is the clustering factor of the new index, and it is worth a short detour because it shows that cost is not a stopwatch.
+
+<Callout kind="note" title="The clustering factor and the ROWID">Oracle keeps the clustering factor as low as it can by using the `ROWID` as a final tie-breaker in the index order. Entries with equal key values are ordered by their physical address, so the index follows the table order wherever the keys allow it. Adding `product_id` to the index inserts a new sort criterion ahead of the `ROWID`. The index has fewer ties left to break by address, so its order can only drift further from the table order; the clustering factor cannot improve, and the cost estimate rises with it. In practice the sales of one day are probably still stored close together. The scan reads the same table blocks as before, only in a different sequence and more than once, and with those blocks in cache the real cost is far below what the estimate suggests.</Callout>
+
+## 4. Only the scanned range has to be in order
+
+The requirement is narrower than "the index is sorted like the ORDER BY". It is enough that the part of the index the query scans is in the required order. Sort yesterday's sales by product alone, and the index still works.
+
+```sql
+SELECT sale_date, product_id, quantity
+  FROM sales
+ WHERE sale_date = TRUNC(sysdate) - INTERVAL '1' DAY
+ ORDER BY product_id
+```
+
+Inside the range for one day every entry has the same `sale_date`, so `product_id` is the only thing that varies. Within that range the index is in product order, and that is all the `ORDER BY` asks for.
+
+<Figure n="6.1" title="Sort order in the scanned index range">
+
+| sale_date | product_id | |
+| --- | --- | --- |
+| 3 days ago | 12 | |
+| 3 days ago | 47 | |
+| 2 days ago | 5 | |
+| 2 days ago | 88 | |
+| yesterday | 9 | scanned |
+| yesterday | 23 | scanned |
+| yesterday | 61 | scanned |
+| today | 3 | |
+| today | 77 | |
+
+<p slot="caption">The index on (sale_date, product_id). With an equality on sale_date the scanned range is one day, and inside that day the entries are in product order.</p>
+</Figure>
+
+Now widen the range by a single character.
+
+```sql
+SELECT sale_date, product_id, quantity
+  FROM sales
+ WHERE sale_date >= TRUNC(sysdate) - INTERVAL '1' DAY
+ ORDER BY product_id
+```
+
+This is no longer yesterday's sales but every sale since yesterday. Extend the scanned range in the figure down into today and the product numbers start over at 3. The entries are in product order per day, not overall, so the database has to sort again.
+
+<EngineTabs>
+  <Fragment slot="db2">
+  ```
+  Explain Plan
+  -------------------------------------------------------------
+  ID | Operation              |                     Rows | Cost
+   1 | RETURN                 |                          |  688
+   2 |  TBSCAN                |     394 of 394 (100.00%) |  688
+   3 |   SORT                 |     394 of 394 (100.00%) |  688
+   4 |    FETCH SALES         |     394 of 394 (100.00%) |  688
+   5 |     IXSCAN SALES_DT_PR | 394 of 1009326 (   .04%) |   24
+
+  Predicate Information
+   5 - START ((CURRENT DATE - 1 DAYS) <= Q1.SALE_DATE)
+  ```
+  </Fragment>
+  <Fragment slot="oracle">
+  ```
+  ---------------------------------------------------------------
+  |Id |Operation                    | Name        | Rows | Cost |
+  ---------------------------------------------------------------
+  | 0 |SELECT STATEMENT             |             |  320 |  301 |
+  | 1 | SORT ORDER BY               |             |  320 |  301 |
+  | 2 |  TABLE ACCESS BY INDEX ROWID| SALES       |  320 |  300 |
+  |*3 |   INDEX RANGE SCAN          | SALES_DT_PR |  320 |    4 |
+  ---------------------------------------------------------------
+  ```
+  </Fragment>
+</EngineTabs>
+
+<Callout kind="warning" title="Common mistake">Treating `=` and `>=` as interchangeable for the index. Both use the same index for the where clause, but only the equality leaves the scanned range in the order of the next column. Any range, `IN` list, `LIKE` or inequality on a column ahead of the sort column brings the sort back.</Callout>
+
+## 5. Why is the sort still there?
+
+When you expected a pipelined plan and got a sort, there are exactly two possible reasons. Either the optimizer found the plan with the sort cheaper by its cost estimate, or the index order in the scanned range does not match the `ORDER BY`.
+
+There is a quick way to tell them apart. Rewrite the `ORDER BY` so it lists the full index definition, column for column. That removes the second reason by construction. If the sort is still in the plan, the optimizer prefers it for cost. If the sort has gone, the original `ORDER BY` did not match the index, and you have just seen what the index can deliver.
+
+<KeyIdea title="Remember">Spell the whole index column list out as the `ORDER BY` to find out why the database sorts. Run it and look at the rows too: the index order is often not what you pictured.</KeyIdea>
+
+When the optimizer chose the sort for its cost, it is usually because it plans for the whole result. It picks the plan that gets to the *last* row fastest, and for a large result that may well be the full scan with a sort. If the database knows that the application will only fetch the first few rows, the calculation changes and the pipelined plan wins. Telling it so is what [Unit 7](/sql/partial-results/) is about.
+
+## 6. Try it yourself
+
+The playground has the index `sales_dt_pr` on `(sale_date, product_id)` created in advance. SQLite calls its sort `USE TEMP B-TREE FOR ORDER BY`; a plan without that line is a pipelined `ORDER BY`.
+
+<TryIt id="6.1" setup={`CREATE INDEX sales_dt_pr ON sales (sale_date, product_id);`} tasks={[
+  { text: 'Run the query as given. The plan is a single <code>SEARCH sales USING INDEX sales_dt_pr</code> line, with no temp b-tree.', sql: "sale_date\\s*=\\s*'2024-03-05'", plan: '^(?![\\s\\S]*TEMP B-TREE)SEARCH sales USING INDEX sales_dt_pr' },
+  { text: 'Change <code>=</code> to <code>&gt;=</code> and sort by <code>product_id</code> only. The temp b-tree is back.', sql: 'sale_date\\s*>=[\\s\\S]*order\\s+by\\s+product_id', plan: 'TEMP B-TREE FOR ORDER BY' },
+  { text: 'Keep the <code>&gt;=</code> but write the full index definition into the ORDER BY: <code>ORDER BY sale_date, product_id</code>. The sort disappears, which tells you the index order was the reason, not the cost.', sql: 'sale_date\\s*>=[\\s\\S]*order\\s+by\\s+sale_date\\s*,\\s*product_id', plan: '^(?![\\s\\S]*TEMP B-TREE)SEARCH sales USING INDEX sales_dt_pr' },
+]} sql={`SELECT sale_date, product_id, quantity
+  FROM sales
+ WHERE sale_date = '2024-03-05'
+ ORDER BY sale_date, product_id;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 2</summary><div class="d">The range covers many days. Inside it the entries are in product order per day, not overall.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT sale&#95;date, product&#95;id, quantity
+  FROM sales
+ WHERE sale&#95;date &gt;= '2024-03-05'
+ ORDER BY sale&#95;date, product&#95;id;
+-- plan: SEARCH sales USING INDEX sales&#95;dt&#95;pr (sale&#95;date&gt;?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="The index is sales (sale_date, product_id). The query is WHERE sale_date >= :d ORDER BY product_id and the plan shows a sort. You change the ORDER BY to sale_date, product_id and the sort disappears. What have you learned?"
+  options={[
+    'The optimizer preferred the sort for its cost estimate. Gather statistics and try again.',
+    'The scanned index range was not in product order, so the index could not serve the original ORDER BY.',
+    'The index is corrupt and needs to be rebuilt.',
+  ]}
+  answer={1}
+  explain="Writing the full index definition into the ORDER BY removes any mismatch between index order and requested order. If the sort then goes away, the mismatch was the reason. A range over several days leaves the entries in product order per day only, which is not product order overall."
+/>

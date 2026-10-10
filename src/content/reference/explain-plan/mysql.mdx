@@ -1,0 +1,209 @@
+---
+title: MySQL
+subtitle: The EXPLAIN table, the TREE format and EXPLAIN ANALYZE, and how key_len and the Extra column tell you which part of the where clause used the index.
+section: explain-plan
+order: 2
+summary: Reading MySQL execution plans for indexing work. EXPLAIN columns (type, key, key_len, ref, rows, filtered, Extra), EXPLAIN FORMAT=TREE, EXPLAIN ANALYZE, and how to separate access predicates from index conditions and filters.
+source: https://use-the-index-luke.com/sql/explain-plan/mysql/getting-an-execution-plan
+---
+import { Callout } from '@/components/mdx';
+
+## Getting an execution plan
+
+`EXPLAIN` in front of a statement prints one row per table the optimizer will touch, in the order it will touch them. The `\G` terminator of the `mysql` client prints each row vertically, which is far easier to read than the wide table.
+
+A statement that touches no table at all still produces a row, which is a convenient way to see the columns.
+
+```sql
+EXPLAIN SELECT 1\G
+```
+
+```
+           id: 1
+  select_type: SIMPLE
+        table: NULL
+         type: NULL
+possible_keys: NULL
+          key: NULL
+      key_len: NULL
+          ref: NULL
+         rows: NULL
+     filtered: NULL
+        Extra: No tables used
+```
+
+The column that matters most is `type`. The MySQL manual calls it the join type, but what it describes is how the table is accessed, so this page calls it the access type. Before MySQL 5.7 the `filtered` column and the rewritten query shown by `SHOW WARNINGS` were only available through `EXPLAIN EXTENDED`; 8.0 removed the keyword, because both are always on, and on 8.x it is a syntax error.
+
+```sql
+EXPLAIN
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name = 'Winand'\G
+```
+
+Since MySQL 8.0.16 the same plan is available as an indented tree, which reads much like the plans of other databases and shows the order of operations explicitly.
+
+```sql
+EXPLAIN FORMAT=TREE
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name = 'Winand';
+```
+
+From 8.0.18 on, `EXPLAIN ANALYZE` executes the statement and prints the tree with actual timings and row counts next to the estimates. This is the form to use whenever you can afford to run the query.
+
+```sql
+EXPLAIN ANALYZE
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name = 'Winand';
+```
+
+<Callout kind="warning" title="EXPLAIN ANALYZE executes the statement">Rows are really read and, for data-changing statements, really changed. Run it inside a transaction you roll back, or against a copy.</Callout>
+
+`EXPLAIN FORMAT=JSON` carries the most detail, including per-table cost breakdowns and the `attached_condition` that shows exactly which predicate is evaluated where. `EXPLAIN FOR CONNECTION <id>` shows the plan of a statement currently running in another session. After any `EXPLAIN`, `SHOW WARNINGS` prints the query as the optimizer rewrote it, which is useful when a condition disappeared or was transformed.
+
+## Operations
+
+The tabular `EXPLAIN` describes each table access through its `type` column; the tree format names the operation. Both are listed here because you will see both.
+
+| `type` / tree node | What it means |
+| --- | --- |
+| `const` / `Constant row from` | At most one row, found through a primary key or unique index with constants. The optimizer reads it once and treats the values as constants. |
+| `eq_ref` / `Single-row index lookup on` | One row per row of the previous table, via a primary key or unique index. The index lookup inside a nested loops join. |
+| `ref` / `Index lookup on` | Equality on a non-unique index, or on a leading part of an index. Several rows may match. This is the ordinary index range scan for an equality condition. |
+| `range` / `Index range scan on` | A range on an indexed column: `BETWEEN`, `<`, `>`, `IN`, `LIKE 'abc%'`. The tree form prints the boundaries after `over`. |
+| `index` / `Index scan on` | Reads the whole index in order. Cheap only when the index is covering (`Using index`) or when the order is what the query wants. |
+| `ALL` / `Table scan on` | Full table scan. Reads every row and every column from disk and is the most expensive access type in both I/O and CPU. |
+| `index_merge` / `Intersect`, `Union`, `Sort-union` | Two or more single-column indexes used together, their results merged. Usually a sign that a concatenated index is missing. |
+| `Covering index lookup on`, `Covering index scan on` | Same as the lookup and scan above, with every needed column read from the index. The tabular form shows this as `Using index` in `Extra`. |
+| `Nested loop inner join`, `Nested loop left join` | For each row of the first child, run the second child. The second child is usually an index lookup. |
+| `Inner hash join` with a `Hash` child | Hash join, available since 8.0.18. The tabular form prints `Using join buffer (hash join)`. No index on the join column is involved. |
+| `Sort:` | An explicit sort. `Using filesort` in the tabular form, whether it sorts in memory or on disk. |
+| `Temporary table` | A temporary table for `GROUP BY`, `DISTINCT` or `UNION`. `Using temporary` in the tabular form. |
+| `Group aggregate:` | Grouping on input that already arrives in group order, typically from an index. No temporary table. |
+| `Aggregate:` | A single-group aggregate such as `COUNT(*)` over the whole input. |
+| `Limit:` | Stops after the requested number of rows. `Limit/Offset:` when an offset is present. |
+
+MySQL has no merge join; ordered inputs are joined by nested loops.
+
+Three conventions of the tabular form are worth knowing. The primary key index is always called `PRIMARY` in `key` and `possible_keys`. `Using index` in `Extra` marks an index-only access, but it is not printed when the access goes through InnoDB's clustered `PRIMARY` index, although that access is index-only by construction, since the clustered index holds the whole row. And a top-N query has no marker of its own: a `LIMIT` whose plan shows no `Using filesort` is being executed pipelined, from an index that delivers the order; a `LIMIT` combined with `Using filesort` sorts first and discards afterwards.
+
+## Access predicates and filter predicates
+
+The tabular `EXPLAIN` tells you how much of the index was used for the lookup through `key_len`, the number of bytes of the index key that the access predicate covers. Assume the index exists and that `last_name` is a `VARCHAR(255)` in `utf8mb4`.
+
+```sql
+CREATE INDEX emp_sub_name ON employees (subsidiary_id, last_name);
+
+EXPLAIN
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name = 'Winand'\G
+```
+
+```
+           id: 1
+  select_type: SIMPLE
+        table: employees
+   partitions: NULL
+         type: ref
+possible_keys: emp_sub_name
+          key: emp_sub_name
+      key_len: 1026
+          ref: const,const
+         rows: 33
+     filtered: 100.00
+        Extra: NULL
+```
+
+`key_len` is 1026: four bytes for the `INT` plus 1022 for the variable-length string (255 characters of up to four bytes, plus two length bytes). Both columns are in the key, `ref` lists two constants, and `Extra` is empty because nothing is left to filter. The whole where clause is the access predicate.
+
+```sql
+EXPLAIN
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE last_name = 'Winand'\G
+```
+
+```
+         type: ALL
+possible_keys: NULL
+          key: NULL
+      key_len: NULL
+          ref: NULL
+         rows: 1000
+     filtered: 10.00
+        Extra: Using where
+```
+
+Without a condition on `subsidiary_id` the index is not even a candidate (`possible_keys` is `NULL`). Every row is read and the condition is applied afterwards; that is what `Using where` means. The tree form prints the same plan as a `Filter` node sitting on top of a `Table scan`.
+
+```
+-> Filter: (employees.last_name = 'Winand')  (cost=102.75 rows=100)
+    -> Table scan on employees  (cost=102.75 rows=1000)
+```
+
+A leading wildcard produces the mixed case.
+
+```sql
+EXPLAIN
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name LIKE '%and'\G
+```
+
+```
+         type: ref
+possible_keys: emp_sub_name
+          key: emp_sub_name
+      key_len: 4
+          ref: const
+         rows: 500
+     filtered: 11.11
+        Extra: Using index condition
+```
+
+`key_len` dropped to 4: only `subsidiary_id` defines the range. The `LIKE` is listed under `Extra` as `Using index condition`, which is index condition pushdown: the storage engine checks the condition against the index entry and only fetches the row from the table when it passes. That saves the table reads for the 467 non-matching entries, but all 500 index entries of subsidiary 20 are still read. It is a filter on index columns, not an access predicate.
+
+The tree form shows the pushed-down condition on the lookup node itself.
+
+```
+-> Index lookup on employees using emp_sub_name (subsidiary_id=20), with index condition: (employees.last_name like '%and')  (cost=175.00 rows=500)
+```
+
+Compare that with a condition on a column that is not in the index at all, `date_of_birth` for instance. `key_len` stays at 4, but `Extra` now says `Using where`: the row has to be fetched from the table before the condition can be checked. In the tree format that appears as a separate `Filter` node above the index lookup. The order of severity is therefore: no `Extra` entry (all access), `Using index condition` (filtered in the index, rows not fetched), `Using where` (filtered after the table fetch).
+
+The column does not have to be behind a `LIKE` to be demoted. With an index on `(subsidiary_id, last_name, first_name)` and the query `WHERE subsidiary_id = 20 AND first_name = 'Markus'`, `key_len` is 4 and `Extra` reads `Using index condition`: the entries of subsidiary 20 are sorted by `last_name`, so `first_name` cannot narrow the range even though it is in the index. Only the columns up to the first gap count. Before MySQL 5.6, which introduced index condition pushdown, the same plan said `Using where` and the row was fetched before the condition was tested.
+
+<Callout kind="note" title="key_len is the fastest check">Compare `key_len` with the byte length of the full index key. If it is shorter, some index column is not in the access predicate, and the remaining conditions show up as `Using index condition` or `Using where`. The `ref` column confirms it: it lists one `const` (or one column name, inside a join) per key part used. The JSON format spells this out as `used_key_parts`.</Callout>
+
+<Callout kind="warning" title="A filter on an index column is still a filter">`type: ref` with the right index in `key` looks like a solved problem. If `key_len` is short, the index range still grows with the table and the condition in `Extra` is doing the real work. Whatever `EXPLAIN` does not prove to be part of the key is a filter. The [data volume lesson](/sql/testing-scalability/data-volume/) shows how such a query degrades.</Callout>
+
+## Reading the numbers
+
+In the tabular form, `rows` is the number of rows the optimizer expects to examine for this table per execution, and `filtered` is the percentage it expects to survive the conditions that are applied after the access. Multiply the two to get the rows passed to the next table. A `filtered` well below 100 means a filter predicate is doing the work the index should be doing.
+
+The tree form prints `(cost=175.00 rows=500)` per node. The cost is in optimizer units, comparable only between plans of the same query. `rows` is the estimated output of that node.
+
+`EXPLAIN ANALYZE` appends a second group: `(actual time=0.062..0.510 rows=33 loops=1)`. The first time is milliseconds until the first row, the second until the last; `rows` is what the node actually produced; `loops` is how often it ran. Like elsewhere, the times and rows are per loop, so multiply by `loops` for the inner side of a nested loops join.
+
+The comparison worth making is estimated `rows` against actual `rows` on the same node. If the index lookup estimated 500 and produced 33, the optimizer did not know about the `LIKE`, which is expected. If an estimate is wrong on a plain equality, the statistics are stale: `ANALYZE TABLE employees;` refreshes them.
+
+MySQL does not print buffer or page counts in the plan. The nearest equivalent is the handler counters, which count rows read by the storage engine for the session.
+
+```sql
+FLUSH STATUS;
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name LIKE '%and';
+SHOW SESSION STATUS LIKE 'Handler_read%';
+```
+
+`Handler_read_key` counts index lookups, `Handler_read_next` counts entries read along the leaf chain, `Handler_read_rnd_next` counts rows read by a table scan. A query that returns 33 rows with `Handler_read_next` at 500 has a filter problem that the `rows` column alone would not reveal.

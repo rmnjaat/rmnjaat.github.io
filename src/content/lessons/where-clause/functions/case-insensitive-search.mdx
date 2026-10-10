@@ -1,0 +1,264 @@
+---
+title: Case-Insensitive Search
+subtitle: An index on last_name cannot answer a question about UPPER(last_name). An index on UPPER(last_name) can, as long as the query spells the expression the same way.
+chapter: where-clause
+order: 2.1
+kind: lesson
+minutes: 11
+summary: Why UPPER(last_name) = ? does a full table scan despite an index on last_name, how the optimizer sees a function as a black box, how to create a function-based index and read its plan in each database, why Oracle needs fresh statistics afterwards, and how SQL Server and older MySQL get there with computed columns.
+prereqs: "You should have read <a href='/sql/where-clause/functions/'>Functions</a> and <a href='/sql/where-clause/the-equals-operator/slow-indexes-part-ii/'>Slow Indexes, Part II</a>, and know how to find the predicate information in a plan."
+outcomes:
+  - Why a condition on UPPER(last_name) cannot use an index on last_name
+  - How the optimizer treats a function, and why the right-hand side is harmless
+  - How to create a function-based index and recognise it in the plan
+  - Why contradictory row estimates point at stale statistics, and what to do about them
+  - How SQL Server and MySQL before 8.0.13 index an expression through a computed or generated column
+recap:
+  - A condition on UPPER(last_name) cannot use an index on last_name. To the optimizer the function is a black box, and its input is irrelevant.
+  - A function-based index stores the result of the expression. Create it on UPPER(last_name) and the same condition becomes an ordinary index range scan.
+  - The expression in the where clause must match the indexed expression exactly. UPPER and LOWER are different indexes, and ORMs may pick one for you.
+  - After creating a function-based index in Oracle, refresh the table statistics. Contradictory row estimates in a plan are the symptom of not doing so.
+  - SQL Server, and MySQL before 8.0.13, index a computed or generated column instead. Sometimes the query must name that column; check the plan.
+source: https://use-the-index-luke.com/sql/where-clause/functions/case-insensitive-search
+---
+import { Callout, KeyIdea, EngineTabs, Check, TryIt } from '@/components/mdx';
+
+Ignoring case in a comparison is easy to write. Convert both sides to the same case and compare the results.
+
+```sql
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE UPPER(last_name) = UPPER('winand')
+```
+
+Whatever capitalisation the user typed and whatever is stored in `last_name`, the two `UPPER` calls make them agree. The logic is sound. The execution plan is not.
+
+<Callout kind="note">Case-insensitive matching can also come from a **collation**. The default collations of SQL Server and MySQL do not distinguish upper from lower case, so on those databases a plain `=` already ignores case.</Callout>
+
+## 1. The full table scan returns
+
+<EngineTabs>
+  <Fragment slot="db2">
+  ```
+  Explain Plan
+  ------------------------------------------------------
+  ID | Operation         |                   Rows | Cost
+   1 | RETURN            |                        |  690
+   2 |  TBSCAN EMPLOYEES | 400 of 10000 (  4.00%) |  690
+
+  Predicate Information
+   2 - SARG ( UPPER(Q1.LAST_NAME) = 'WINAND')
+  ```
+  </Fragment>
+  <Fragment slot="oracle">
+  ```
+  ----------------------------------------------------
+  | Id | Operation         | Name      | Rows | Cost |
+  ----------------------------------------------------
+  |  0 | SELECT STATEMENT  |           |   10 |  477 |
+  |* 1 |  TABLE ACCESS FULL| EMPLOYEES |   10 |  477 |
+  ----------------------------------------------------
+
+  Predicate Information (identified by operation id):
+  ---------------------------------------------------
+     1 - filter(UPPER("LAST_NAME")='WINAND')
+  ```
+  </Fragment>
+  <Fragment slot="postgresql">
+  ```
+                       QUERY PLAN
+  ------------------------------------------------------
+   Seq Scan on employees
+     (cost=0.00..1722.00 rows=50 width=17)
+     Filter: (upper((last_name)::text) = 'WINAND'::text)
+  ```
+  </Fragment>
+</EngineTabs>
+
+The index on `last_name` exists and is ignored. It is unusable because the query does not search `last_name`; it searches `UPPER(last_name)`, and from the database's point of view that is a different thing altogether.
+
+## 2. The optimizer sees a black box
+
+This is an easy trap to fall into. We see the connection between `last_name` and `UPPER(last_name)` at a glance and assume the database sees it too. What the optimizer actually sees is closer to this:
+
+```sql
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE BLACKBOX(...) = 'WINAND'
+```
+
+`UPPER` is a black box. Its arguments do not matter, because in general there is no relationship between what goes into a function and what comes out. The optimizer cannot assume that the output is sorted like the input, so an index on the input is of no help.
+
+<Callout kind="tip">When in doubt, rewrite the function name as `BLACKBOX` in your head. That is the optimizer's view of the condition.</Callout>
+
+<Callout kind="note" title="Compile-time evaluation">The right-hand side, `UPPER('winand')`, is a different matter. All of its inputs are known when the statement is compiled, so the optimizer can evaluate it once, before any row is read. That is why Oracle's predicate information shows only `'WINAND'`, the upper-case constant. It is the same thing a compiler does when it folds constant expressions at compile time.</Callout>
+
+## 3. Index the expression
+
+If the index must contain what the query searches for, then the index must not be on `last_name` but on `UPPER(last_name)`.
+
+```sql
+CREATE INDEX emp_up_name
+    ON employees (UPPER(last_name))
+```
+
+An index whose definition contains a function or expression is a **function-based index** (FBI). Instead of copying the column value into the index, the database applies the function first and stores the result. This index stores every name in capitals.
+
+The database can use a function-based index when the exact expression from the index definition appears in the statement, as it does here. The plans confirm it.
+
+<EngineTabs>
+  <Fragment slot="db2">
+  ```
+  Explain Plan
+  -------------------------------------------------------
+  ID | Operation            |                 Rows | Cost
+   1 | RETURN               |                      |   13
+   2 |  FETCH EMPLOYEES     |     1 of 1 (100.00%) |   13
+   3 |   IXSCAN EMP_UP_NAME | 1 of 10000 (   .01%) |    6
+
+  Predicate Information
+   3 - START ( UPPER(Q1.LAST_NAME) = 'WINAND')
+        STOP ( UPPER(Q1.LAST_NAME) = 'WINAND')
+  ```
+
+  For this plan the query was changed to `WHERE UPPER(last_name) = 'WINAND'`, without `UPPER` on the right-hand side. With `UPPER('winand')` the Db2 optimizer badly misjudges the selectivity, expects 4% of the table, and stays with a `TBSCAN`. The [full table scan note](/sql/where-clause/the-equals-operator/concatenated-keys/) explains why that can be a rational choice for a large share of the rows.
+  </Fragment>
+  <Fragment slot="oracle">
+  ```
+  --------------------------------------------------------------
+  |Id |Operation                   | Name        | Rows | Cost |
+  --------------------------------------------------------------
+  | 0 |SELECT STATEMENT            |             |  100 |   41 |
+  | 1 | TABLE ACCESS BY INDEX ROWID| EMPLOYEES   |  100 |   41 |
+  |*2 |  INDEX RANGE SCAN          | EMP_UP_NAME |   40 |    1 |
+  --------------------------------------------------------------
+
+  Predicate Information (identified by operation id):
+  ---------------------------------------------------
+    2 - access(UPPER("LAST_NAME")='WINAND')
+  ```
+  </Fragment>
+  <Fragment slot="postgresql">
+  ```
+                         QUERY PLAN
+  ------------------------------------------------------------
+  Bitmap Heap Scan on employees
+    (cost=4.65..178.65 rows=50 width=17)
+    Recheck Cond: (upper((last_name)::text) = 'WINAND'::text)
+    -> Bitmap Index Scan on emp_up_name
+       (cost=0.00..4.64 rows=50 width=0)
+       Index Cond: (upper((last_name)::text) = 'WINAND'::text)
+  ```
+  </Fragment>
+</EngineTabs>
+
+This is a plain `INDEX RANGE SCAN` as unit 1 described it: traverse the tree, follow the leaf chain. There is no special operation and no keyword that marks a function-based index in a plan.
+
+<Callout kind="warning" title="Common mistake">Letting the ORM choose the function. Some persistence frameworks add `UPPER` or `LOWER` to a case-insensitive search without telling you; Hibernate, for example, injects an [implicit `LOWER`](/sql/myth-directory/dynamic-sql-is-slow/). Check the generated SQL and index the expression that is actually sent.</Callout>
+
+## 4. Check the estimates
+
+The Oracle plan is not yet what we had before `UPPER` entered the picture: the row estimates are too high. Stranger still, they contradict each other. The table access expects to fetch 100 rows, but the index scan that feeds it only delivers 40. It cannot fetch rows it was never given. Contradictory estimates like this usually mean a problem with the statistics, and here the cause is specific: Oracle does not refresh the table statistics when a new index is created.
+
+<Callout kind="note" title="Oracle statistics for function-based indexes">Oracle keeps the number of distinct values per column as part of the table statistics, where several indexes can share them. For a function-based index those figures live in the table statistics as well, attached to a hidden virtual column. Since release 10g Oracle gathers the statistics of a new index automatically, but it leaves the table statistics alone. The Oracle documentation therefore advises collecting statistics on both the index and its base table with `DBMS_STATS` after creating a function-based index, so that the optimizer can judge when to use it. A stricter habit is to refresh the statistics of the table and all its indexes after every index change. That can have side effects of its own, so agree it with the DBAs and keep a backup of the previous statistics.</Callout>
+
+With refreshed statistics the estimates become realistic.
+
+<EngineTabs>
+  <Fragment slot="oracle">
+  ```
+  --------------------------------------------------------------
+  |Id |Operation                   | Name        | Rows | Cost |
+  --------------------------------------------------------------
+  | 0 |SELECT STATEMENT            |             |    1 |    3 |
+  | 1 | TABLE ACCESS BY INDEX ROWID| EMPLOYEES   |    1 |    3 |
+  |*2 |  INDEX RANGE SCAN          | EMP_UP_NAME |    1 |    1 |
+  --------------------------------------------------------------
+
+  Predicate Information (identified by operation id):
+  ---------------------------------------------------
+    2 - access(UPPER("LAST_NAME")='WINAND')
+  ```
+  </Fragment>
+  <Fragment slot="postgresql">
+  ```
+                        QUERY PLAN
+  ----------------------------------------------------------
+   Index Scan using emp_up_name on employees
+     (cost=0.00..8.28 rows=1 width=17)
+     Index Cond: (upper((last_name)::text) = 'WINAND'::text)
+  ```
+
+  The estimate fell from 50 rows to 1, and with so few rows the planner drops the bitmap pair in favour of the simpler `Index Scan`.
+  </Fragment>
+</EngineTabs>
+
+<Callout kind="note">Oracle 11g introduced **extended statistics** on expressions and on groups of columns, which cover this case more generally.</Callout>
+
+In this example the fresh statistics did not change the speed; the index was used either way. Checking the optimizer's estimates is still worth the habit. The estimated row count per operation, the **cardinality estimate**, is one of the most telling numbers in a plan, and SQL Server and PostgreSQL print it too.
+
+<Callout kind="tip">The [execution plans reference](/sql/explain-plan/) shows where each database prints its row estimates.</Callout>
+
+## 5. Computed and generated columns
+
+SQL Server, and MySQL before 8.0.13, do not index an expression directly. Both reach the same result through a column that is defined by an expression: add the column, then index it.
+
+<EngineTabs>
+  <Fragment slot="mysql">
+  Since MySQL 5.7 a generated column can be indexed. From 8.0.13 the expression can be indexed directly as well, `CREATE INDEX emp_up_name ON employees ((UPPER(last_name)))`, with the double parentheses; MySQL then creates the hidden generated column for you.
+
+  ```sql
+  ALTER TABLE employees
+    ADD COLUMN last_name_up VARCHAR(255) AS (UPPER(last_name));
+  ```
+
+  ```sql
+  CREATE INDEX emp_up_name ON employees (last_name_up);
+  ```
+  </Fragment>
+  <Fragment slot="sql-server">
+  ```sql
+  ALTER TABLE employees ADD last_name_up AS UPPER(last_name)
+  ```
+
+  ```sql
+  CREATE INDEX emp_up_name ON employees (last_name_up)
+  ```
+  </Fragment>
+</EngineTabs>
+
+Both databases can use the index when the indexed expression appears in the statement, and in simple cases the original query works unchanged. In other cases the query has to name the new column, `last_name_up`, before the index is picked up. When in doubt, look at the plan.
+
+<KeyIdea>The expression in the index and the expression in the where clause have to match. Whatever form that takes, computed column or indexed expression, the plan is the only proof that they do.</KeyIdea>
+
+## 6. Try it
+
+SQLite supports indexes on expressions, so the playground can show both halves of the story. It reports an indexed expression as `<expr>` in the plan.
+
+<TryIt id="2.4" tasks={[
+  { text: 'Run the case-insensitive search as it is. The plan says <code>SCAN employees</code>.', sql: 'upper\\s*\\(\\s*last_name\\s*\\)\\s*=', plan: '^SCAN employees' },
+  { text: 'Create an index <code>emp_up_name</code> on <code>UPPER(last_name)</code>.', sql: 'create\\s+index\\s+emp_up_name\\s+on\\s+employees\\s*\\(\\s*upper\\s*\\(\\s*last_name\\s*\\)\\s*\\)' },
+  { text: 'Run the same query again. It now reads <code>SEARCH employees USING INDEX emp_up_name (&lt;expr&gt;=?)</code>.', sql: 'upper\\s*\\(\\s*last_name\\s*\\)\\s*=', plan: 'USING INDEX emp_up_name \\(<expr>=\\?\\)' },
+]} sql={`SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE UPPER(last_name) = UPPER('winand');`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 3</summary><div class="d">Change <code>UPPER(last_name)</code> to <code>LOWER(last_name)</code> afterwards and run it once more. The index is gone from the plan, because the expression no longer matches.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX emp&#95;up&#95;name ON employees (UPPER(last&#95;name));
+SELECT first&#95;name, last&#95;name, phone&#95;number
+  FROM employees WHERE UPPER(last&#95;name) = UPPER('winand');
+-- plan: SEARCH employees USING INDEX emp&#95;up&#95;name (&lt;expr&gt;=?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="There is an index on UPPER(last_name). Which of these queries can use it?"
+  options={[
+    "WHERE LOWER(last_name) = 'winand'",
+    "WHERE last_name = 'Winand'",
+    "WHERE UPPER(last_name) = UPPER(?)",
+  ]}
+  answer={2}
+  explain="A function-based index serves conditions whose left-hand expression matches the indexed expression. Only the third query compares UPPER(last_name). The right-hand side does not matter; UPPER(?) is evaluated once at compile time and behaves like a constant."
+/>

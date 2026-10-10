@@ -1,0 +1,230 @@
+---
+title: Smart Logic
+subtitle: One statement that covers every combination of optional filters by switching conditions off with NULL parameters is elegant to write and a full table scan to run. Send the database only the conditions that apply right now.
+chapter: where-clause
+order: 7.4
+kind: lesson
+minutes: 12
+summary: Why databases are built for dynamic SQL, why the pattern (col = :p OR :p IS NULL) forces a generic full-scan plan in databases with a shared plan cache, why inlining literals proves the point but is no fix, how dynamic SQL with bind parameters solves it, and what Db2, MySQL, Oracle, PostgreSQL and SQL Server do about bind values and plan caching.
+prereqs: "You should have read <a href='/sql/where-clause/bind-parameters/'>Parameterized Queries</a> and know why a cached plan has to work for every parameter value."
+outcomes:
+  - Why ad-hoc queries are something databases are good at
+  - What the smart logic pattern looks like and why it is one of the worst anti-patterns
+  - Why the plan is a full table scan even with an index on every column
+  - Why literal values would fix the plan and why that is not a solution
+  - How each database tries to cope, from REOPT to bind peeking to parameter sniffing
+recap:
+  - The optimizer works at runtime, so databases are made for dynamic SQL. Use it when you need it.
+  - With (col = :p OR :p IS NULL) for every filter, the cached plan has to cover the case where all filters are off, which is a full table scan.
+  - Literal values let the optimizer pick the index, but they invite SQL injection and raise optimization overhead. They only prove the database could do it.
+  - Generate the statement from the filters that are set and keep bind parameters for the values.
+  - Bind peeking, adaptive cursor sharing, parameter sniffing and REOPT exist to soften the problem and bring problems of their own. The reliable fix is to leave unnecessary filters out.
+source: https://use-the-index-luke.com/sql/where-clause/obfuscation/smart-logic
+---
+import { Callout, KeyIdea, EngineTabs, Check, TryIt } from '@/components/mdx';
+
+A defining feature of SQL databases is that they accept any query at any time. The optimizer works at runtime: it analyses each statement when it arrives and produces a sensible plan on the spot. [Bind parameters](/sql/where-clause/bind-parameters/) keep the cost of that runtime optimization low. The short version: databases are built for dynamic SQL, so use it when you need it.
+
+## 1. The static alternative
+
+Despite that, a common practice avoids dynamic SQL in favour of static SQL, often because of the ["dynamic SQL is slow"](/sql/myth-directory/dynamic-sql-is-slow/) myth. The practice does more harm than good wherever the database shares execution plans between executions, as Db2 (LUW), Oracle and SQL Server do.
+
+Picture an application that searches the `EMPLOYEES` table by subsidiary, by employee id and by last name (ignoring case), in any combination. A single statement can cover every case with "smart" logic:
+
+```sql
+SELECT first_name, last_name, subsidiary_id, employee_id
+  FROM employees
+ WHERE ( subsidiary_id    = :sub_id OR :sub_id IS NULL )
+   AND ( employee_id      = :emp_id OR :emp_id IS NULL )
+   AND ( UPPER(last_name) = :name   OR :name   IS NULL )
+```
+
+The statement uses named bind variables for readability. Every possible filter is written out, and a filter that is not needed is switched off by passing NULL, which makes its `OR` branch true. It is a perfectly reasonable piece of SQL, and its use of NULL even follows SQL's three-valued logic. It is also one of the worst performance anti-patterns there is.
+
+## 2. One plan for the worst case
+
+The optimizer cannot build the plan around any one filter, because any filter can be switched off at runtime. It has to prepare for the worst case, all filters off, and that means reading the whole table:
+
+```
+----------------------------------------------------
+| Id | Operation         | Name      | Rows | Cost |
+----------------------------------------------------
+|  0 | SELECT STATEMENT  |           |    2 |  478 |
+|* 1 |  TABLE ACCESS FULL| EMPLOYEES |    2 |  478 |
+----------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+1 - filter((:NAME   IS NULL OR UPPER("LAST_NAME")=:NAME)
+       AND (:EMP_ID IS NULL OR "EMPLOYEE_ID"=:EMP_ID)
+       AND (:SUB_ID IS NULL OR "SUBSIDIARY_ID"=:SUB_ID))
+```
+
+So the query does a full table scan, even though every column has an index.
+
+## 3. Literals prove the point, and are no fix
+
+The database is perfectly able to see through the logic. It builds the generic plan because the bind parameters ask it to: one plan, cached, reused with other values later. Put the actual values into the statement text and the optimizer picks the right index for the active filter:
+
+```sql
+SELECT first_name, last_name, subsidiary_id, employee_id
+  FROM employees
+ WHERE( subsidiary_id    = NULL     OR NULL IS NULL )
+   AND( employee_id      = NULL     OR NULL IS NULL )
+   AND( UPPER(last_name) = 'WINAND' OR 'WINAND' IS NULL )
+```
+
+```
+---------------------------------------------------------------
+|Id | Operation                   | Name        | Rows | Cost |
+---------------------------------------------------------------
+| 0 | SELECT STATEMENT            |             |    1 |    2 |
+| 1 |  TABLE ACCESS BY INDEX ROWID| EMPLOYEES   |    1 |    2 |
+|*2 |   INDEX RANGE SCAN          | EMP_UP_NAME |    1 |    1 |
+---------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+2 - access(UPPER("LAST_NAME")='WINAND')
+```
+
+This is not a solution. It only demonstrates that the database can resolve the conditions when it knows the values.
+
+<Callout kind="warning" title="Literal values">Literal values make the application vulnerable to SQL injection and can cause performance problems through the extra optimization overhead of a new plan for every distinct value.</Callout>
+
+## 4. Dynamic SQL with bind parameters
+
+The natural fit for a dynamic query is dynamic SQL. Keep it simple: send only the conditions that apply to this request.
+
+```sql
+SELECT first_name, last_name, subsidiary_id, employee_id
+  FROM employees
+ WHERE UPPER(last_name) = :name
+```
+
+The generated statement still uses a bind parameter for the value. Each combination of filters becomes its own statement with its own plan, and every one of those plans can use an index.
+
+<KeyIdea title="Tip">A where clause that changes from request to request should be generated, with the values still bound. Generated statements with literals in them are what makes the "dynamic SQL is slow" myth come true.</KeyIdea>
+
+## 5. What the databases do about it
+
+The problem is widespread, and every database with a shared plan cache has a feature to deal with it. Each feature brings its own problems and bugs.
+
+<EngineTabs>
+  <Fragment slot="db2">
+  Db2 keeps plans in a shared package cache, so the generic-plan problem applies in full. The `REOPT` bind option selects a re-optimization approach. The default, `NONE`, produces the generic plan described above. `REOPT(ALWAYS)` peeks at the actual bind values on every execution and builds the best plan each time, which effectively turns off plan caching for that statement. `REOPT(ONCE)` peeks only for the first execution. Its weakness is nondeterminism: the first execution's values shape the plan for all later ones, and the plan can change after a restart or whenever the cached plan expires and is rebuilt with different values.
+  </Fragment>
+  <Fragment slot="mysql">
+  MySQL is spared this particular problem: it keeps no execution plan cache, so every execution is planned with the values at hand. A feature request from 2009 weighed up adding one and concluded that, for MySQL's comparatively simple optimizer, the saving would hardly be worth it.
+  </Fragment>
+  <Fragment slot="oracle">
+  Oracle keeps plans in the shared SQL area, so the problem applies in full. Release 9i introduced bind peeking: the optimizer looks at the actual bind values of the first execution when it builds the plan. The weakness is nondeterminism, as with Db2's `REOPT(ONCE)`: the first execution decides for all, and the plan can change after a restart or when the cached plan expires and is recreated with other values.
+
+  Release 11g added adaptive cursor sharing, which can cache several plans for one statement. The optimizer peeks the bind values and stores their estimated selectivity next to the plan. A later execution reuses a cached plan only if its bind values fall inside that plan's selectivity range; otherwise a new plan is built and compared with the cached ones. If an equivalent plan exists, it is replaced by one that also covers the new selectivity estimates; if not, the new variant is cached alongside, with its estimates.
+  </Fragment>
+  <Fragment slot="postgresql">
+  PostgreSQL caches a plan only for a prepared statement, and only while that statement stays open, so the problem appears only when a statement handle is reused. Even then the server plans the first five executions with the real parameter values and switches to a generic plan only if that is not expected to cost more; since release 12, `plan_cache_mode` can force either behaviour. The JDBC driver adds a threshold of its own: it uses server-side prepared statements only from the fifth execution of a handle (`prepareThreshold`), and before that every execution is planned with its values anyway. See also the note on planning with actual bind values in the [bind parameters lesson](/sql/where-clause/bind-parameters/).
+  </Fragment>
+  <Fragment slot="sql-server">
+  SQL Server uses parameter sniffing: the actual bind values of the first execution are used during parsing. The same nondeterminism applies; the first execution shapes the plan, and the plan can change after a restart or when the cached plan expires.
+
+  Query hints give more control. `RECOMPILE` bypasses the plan cache for one statement; `OPTIMIZE FOR` supplies values to optimize for, used only for optimization; `USE PLAN` hands over an entire plan. All of them have accumulated edge cases and bugs that are beyond this lesson; Erland Sommarskog's articles on parameter sniffing track them release by release, SQL Server 2022 included.
+  </Fragment>
+</EngineTabs>
+
+These heuristics can soften the smart logic problem to a degree, but they were built for a different purpose: the trouble that bind parameters cause with column histograms and `LIKE` expressions. The most reliable way to the best plan is to keep unnecessary filters out of the statement.
+
+The [bind parameters lesson](/sql/where-clause/bind-parameters/) covers the parameter side in detail. The section below shows how to assemble the where clause without giving up binding.
+
+## 6. Building the statement with ORM tools
+
+Generating the where clause does not mean abandoning the ORM or writing string concatenation by hand. Every mature tool has a way to add conditions one at a time, and each of them keeps the values as bind parameters.
+
+In Java, JPA's Criteria API collects predicates in a list and joins them at the end:
+
+```java
+List<Predicate> predicates = new ArrayList<>();
+if (subsidiaryId != null) {
+    predicates.add(cb.equal(root.get("subsidiaryId"), subsidiaryId));
+}
+if (employeeId != null) {
+    predicates.add(cb.equal(root.get("employeeId"), employeeId));
+}
+if (lastName != null) {
+    predicates.add(cb.equal(cb.upper(root.get("lastName")), lastName.toUpperCase()));
+}
+query.where(predicates.toArray(new Predicate[0]));
+```
+
+Without an ORM the same idea is two parallel lists, one for the condition text and one for the values. Perl with DBI:
+
+```perl
+my (@where, @bind);
+if (defined $sub_id) { push @where, 'subsidiary_id = ?';    push @bind, $sub_id; }
+if (defined $emp_id) { push @where, 'employee_id = ?';      push @bind, $emp_id; }
+if (defined $name)   { push @where, 'UPPER(last_name) = ?'; push @bind, uc $name; }
+my $sql = 'SELECT first_name, last_name, subsidiary_id, employee_id FROM employees';
+$sql .= ' WHERE ' . join(' AND ', @where) if @where;
+my $rows = $dbh->selectall_arrayref($sql, undef, @bind);
+```
+
+PHP with PDO:
+
+```php
+$where = []; $bind = [];
+if ($subId !== null) { $where[] = 'subsidiary_id = ?';    $bind[] = $subId; }
+if ($empId !== null) { $where[] = 'employee_id = ?';      $bind[] = $empId; }
+if ($name  !== null) { $where[] = 'UPPER(last_name) = ?'; $bind[] = strtoupper($name); }
+$sql = 'SELECT first_name, last_name, subsidiary_id, employee_id FROM employees';
+if ($where) { $sql .= ' WHERE ' . implode(' AND ', $where); }
+$stmt = $pdo->prepare($sql);
+$stmt->execute($bind);
+```
+
+.NET with named parameters on a `SqlCommand`:
+
+```csharp
+var where = new List<string>();
+var cmd = new SqlCommand();
+if (subId != null) { where.Add("subsidiary_id = @sub");     cmd.Parameters.AddWithValue("@sub", subId); }
+if (empId != null) { where.Add("employee_id = @emp");       cmd.Parameters.AddWithValue("@emp", empId); }
+if (name  != null) { where.Add("UPPER(last_name) = @name"); cmd.Parameters.AddWithValue("@name", name.ToUpper()); }
+cmd.CommandText = "SELECT first_name, last_name, subsidiary_id, employee_id FROM employees"
+                + (where.Count > 0 ? " WHERE " + string.Join(" AND ", where) : "");
+```
+
+In every variant the SQL text changes with the set of filters, and the values never enter it.
+
+## 7. Try it
+
+The playground has an index on `UPPER(last_name)` and one on `subsidiary_id`. The first query is the smart logic form; SQLite treats the unbound `?` placeholders as NULL, so all filters are off and the plan is a scan.
+
+<TryIt id="2.7.4" tasks={[
+  { text: 'Run the smart logic query. The plan is <code>SCAN employees</code> and all 1,000 rows come back.', sql: '\\?\\s+is\\s+null', plan: '^SCAN employees' },
+  { text: 'Replace the parameters with literals: <code>NULL</code> for the first two and <code>\'WINAND\'</code> for the name. SQLite does not fold <code>\'WINAND\' IS NULL</code> away, so the plan stays a scan here, unlike Oracle.', sql: "'WINAND'\\s+is\\s+null", plan: '^SCAN employees' },
+  { text: 'Write the statement dynamic SQL would produce: <code>WHERE UPPER(last_name) = \'WINAND\'</code> and nothing else. The plan uses <code>emp_up_name</code>.', sql: "^\\s*select[\\s\\S]*where\\s+upper\\(last_name\\)\\s*=\\s*'WINAND'\\s*;?\\s*$", plan: 'USING INDEX emp_up_name \\(<expr>=\\?\\)' },
+]} setup={`CREATE INDEX emp_up_name ON employees (UPPER(last_name)); CREATE INDEX emp_sub ON employees (subsidiary_id); ANALYZE;`} sql={`SELECT first_name, last_name, subsidiary_id, employee_id
+  FROM employees
+ WHERE ( subsidiary_id    = ? OR ? IS NULL )
+   AND ( employee_id      = ? OR ? IS NULL )
+   AND ( UPPER(last_name) = ? OR ? IS NULL );`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 3</summary><div class="d">Only the filters the user filled in belong in the statement. One filter, one condition, one index.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT first&#95;name, last&#95;name, subsidiary&#95;id, employee&#95;id
+  FROM employees
+ WHERE UPPER(last&#95;name) = 'WINAND';
+-- plan: SEARCH employees USING INDEX emp&#95;up&#95;name (&lt;expr&gt;=?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="Why does WHERE (subsidiary_id = :sub_id OR :sub_id IS NULL) end up as a full table scan in Oracle even when :sub_id is supplied?"
+  options={[
+    'OR conditions can never use an index.',
+    'The cached plan is built before the value is known and must also work when :sub_id is NULL, which requires reading every row.',
+    'IS NULL conditions disable indexes in every database.',
+  ]}
+  answer={1}
+  explain="A shared plan is reused for every execution, so it has to be valid for all parameter values. When :sub_id is NULL every row qualifies, and only a full scan produces them. That plan is then used for selective searches too. Generating the statement from the supplied filters gives each case a plan of its own."
+/>

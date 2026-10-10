@@ -1,0 +1,106 @@
+---
+title: Delete
+subtitle: A delete is a select followed by the removal of the rows it found. The select half profits from indexes; the removal half pays for every one of them.
+chapter: dml
+order: 2
+kind: lesson
+minutes: 8
+summary: How the where clause of a DELETE uses indexes like a SELECT, why removing a row costs about as much as inserting one per index, why the no-index case is missing from the chart, what TRUNCATE does differently, and why the index count has no effect on a PostgreSQL delete.
+prereqs: "You should have read <a href='/sql/dml/insert/'>Insert</a> and the <a href='/sql/where-clause/'>where clause unit</a>, because a delete's where clause is planned exactly like a select's."
+outcomes:
+  - How a DELETE finds its rows and which indexes help it
+  - What removing a row costs per index, and why the curve mirrors the insert curve
+  - Why a delete without any index is still sometimes the right choice
+  - What TRUNCATE does differently and its two side effects
+  - Why the number of indexes leaves a PostgreSQL delete unaffected
+recap:
+  - The where clause of a DELETE is optimised like the where clause of a SELECT. Every technique from Unit 2 applies, and DELETE and UPDATE have execution plans too.
+  - Once found, a row is removed from the table and from every index, with the same tree work as an insert. The measured curve from one to five indexes looks like the insert curve.
+  - A table without indexes removes rows quickly but has to scan the whole table to find them, which is why that case is not in the chart. A full scan can still be right when a large part of the table goes.
+  - TRUNCATE TABLE removes all rows in one step without using any index. It commits implicitly, except in PostgreSQL and SQL Server, and fires no triggers.
+  - Under PostgreSQL's MVCC a delete only sets a flag in the table block; index maintenance happens later in VACUUM, so the index count has no effect on the delete itself.
+source: https://use-the-index-luke.com/sql/dml/delete
+---
+import { Callout, KeyIdea, Figure, Check, TryIt } from '@/components/mdx';
+
+Unlike an insert, a delete has a where clause, and that changes the picture. Finding the rows to remove is a query, and every indexing technique from [Unit 2](/sql/where-clause/) applies to it. A `DELETE` is in effect a `SELECT` with an extra step that removes the rows it identified. The select half can use indexes. The removal half has to maintain them.
+
+## 1. Finding the rows
+
+The where clause of a `DELETE` goes through the same optimizer as the where clause of a `SELECT` and gets the same kind of plan: an index unique scan for a delete by primary key, an index range scan for a date range when `sale_date` is indexed, a full table scan when nothing fits. Access predicates, filter predicates, column order in a concatenated index, functions on the indexed column, all of it behaves exactly as it does for a query.
+
+```sql
+DELETE FROM sales
+ WHERE sale_date < '2024-02-01';
+```
+
+<Callout kind="tip">`DELETE` and `UPDATE` statements have [execution plans](/sql/explain-plan/) too. Look at them the same way you look at a select's.</Callout>
+
+## 2. Removing the rows
+
+Taking a row out is much like putting one in, especially for the indexes. The database removes the row's reference from each index, which means a tree traversal to the right leaf and a change to that leaf, and it keeps the trees balanced while it does so. Every index on the table is involved, not only the one that found the rows: an index that still points at a deleted row would be wrong.
+
+The measured curve therefore looks very much like the insert curve.
+
+<Figure n="8.3" title="Delete performance by number of indexes">
+
+| Indexes | Execution time |
+| --- | --- |
+| 1 | about 0.03 s |
+| 2 | about 0.05 s |
+| 3 | about 0.07 s |
+| 4 | about 0.09 s |
+| 5 | about 0.12 s |
+
+<p slot="caption">Read off the original chart, whose axis runs from 0 to 0.12 seconds and whose index count starts at one. The zero-index case is deliberately absent.</p>
+</Figure>
+
+Why does the chart start at one? In theory a table without indexes should be the fastest to delete from, as it is for insert. But without an index the database has to read the whole table to find the rows, so the removal would be fast and the finding very slow. The measurement leaves that case out.
+
+<KeyIdea>The where clause decides how cheaply the rows are found. The number of indexes decides how expensive it is to remove them.</KeyIdea>
+
+A delete without a usable index is not always wrong, though. When the delete removes a large share of the table, the full scan is the better plan for the same reason it is for a select of that share: sequential reads beat one lookup per row.
+
+## 3. No where clause at all
+
+A `DELETE` without a where clause is the obvious case where no index can help. It is also a case with its own command: `TRUNCATE TABLE`. It has the same effect as a delete of every row, but it removes them in one step instead of one by one, and it is very fast. Two side effects come with it. It commits implicitly, with PostgreSQL and SQL Server as the exceptions where it is transactional. And it fires no triggers.
+
+## 4. MVCC changes the picture
+
+Multiversion concurrency control, MVCC, is how databases let readers and writers work on the same data without blocking each other while each transaction sees a consistent state. Every engine has it in some form, but the implementations differ, and the differences can be large enough to show up in performance.
+
+<Callout kind="note" title="PostgreSQL">PostgreSQL stores the visibility information that decides which transaction sees which row version in the table alone, never in the indexes. A delete therefore only marks the row as gone in its table block; the index entries stay where they are. How many indexes the table has makes no difference to the delete's response time. The row and its index entries are physically removed later, by `VACUUM`.</Callout>
+
+<Callout kind="warning" title="Common mistake">Forgetting the other side of a foreign key. Deleting from a parent table makes the database check the child table for references, and with `ON DELETE CASCADE` it deletes there too. Without an index on the child's foreign key columns, that check is a full scan of the child table for every parent row removed.</Callout>
+
+## 5. Try it yourself
+
+The playground has an index on `sale_date`. SQLite's playground shows a plan for `SELECT` statements only, so look at the select half of each delete first: it is the same plan the delete uses to find its rows.
+
+<TryIt id="8.2" setup={`CREATE INDEX sales_date ON sales (sale_date);`} tasks={[
+  { text: 'Run the count as given. The plan is <code>SEARCH sales USING COVERING INDEX sales_date (sale_date&lt;?)</code>: a tree traversal to the date, and that is how the delete will find its rows.', sql: "count\\s*\\(\\s*\\*\\s*\\)[\\s\\S]*sale_date\\s*<\\s*'2024-02-01'", plan: 'SEARCH sales USING (COVERING )?INDEX sales_date \\(sale_date<\\?\\)' },
+  { text: "Now run <code>DELETE FROM sales WHERE sale_date &lt; '2024-02-01'</code>. The status line reports the rows removed; each one also left the primary key and <code>sales_date</code>.", sql: "delete\\s+from\\s+sales\\s+where\\s+sale_date\\s*<\\s*'2024-02-01'" },
+  { text: 'Count the rows with <code>eur_value &lt; 20</code> instead. No index covers that column, so the plan is <code>SCAN sales</code>, and a delete with that where clause would scan too.', sql: 'eur_value\\s*<\\s*20', plan: '^SCAN sales' },
+]} sql={`SELECT count(*)
+  FROM sales
+ WHERE sale_date < '2024-02-01';`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 3</summary><div class="d">Replace the where clause of the count. The delete would use the identical access path.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>DELETE FROM sales WHERE sale&#95;date &lt; '2024-02-01';
+-- status: done · 970 rows affected
+SELECT count(&#42;) FROM sales WHERE eur&#95;value &lt; 20;
+-- plan: SCAN sales</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="A table sales has indexes on sale_date, on (subsidiary_id, employee_id) and on product_id. DELETE FROM sales WHERE sale_date < '2024-02-01' removes 5,000 rows. On most engines, which indexes does the statement modify?"
+  options={[
+    'Only the index on sale_date, because that is the one the where clause used.',
+    'All three indexes plus the primary key. Every index entry for every deleted row must be removed.',
+    'None. Index entries for deleted rows are removed by the next query that encounters them.',
+  ]}
+  answer={1}
+  explain="The index on sale_date found the rows. Removing them means the entries in every other index would point at rows that no longer exist, so those are removed inside the same statement. PostgreSQL is the exception: it only flags the row and leaves the index work to VACUUM."
+/>

@@ -1,0 +1,135 @@
+---
+title: Emulating Partial Indexes
+subtitle: Oracle has no WHERE clause on CREATE INDEX, but it leaves all-NULL rows out of every index. A function that returns NULL for the rows you do not want is a partial index by other means.
+chapter: where-clause
+order: 6.3
+kind: lesson
+minutes: 7
+summary: How to emulate a partial index in Oracle with a deterministic function that returns NULL for unwanted rows, why the query must use the indexed expression, and the second, partition-based way to do it.
+prereqs: "You should have read <a href='/sql/where-clause/partial-and-filtered-indexes/'>Partial Indexes</a> and <a href='/sql/where-clause/null/index/'>Indexing NULL</a>."
+outcomes:
+  - How Oracle's NULL handling can stand in for a partial index
+  - How to write the function that decides which rows are indexed
+  - Why the query has to repeat the indexed expression
+  - What the partition-based alternative looks like
+recap:
+  - Oracle stores no entry when the indexed expression is NULL. Return NULL for rows that should not be indexed and they stay out.
+  - The function must be deterministic, like anything used in an index definition.
+  - The query must use the indexed expression; a plain condition on the underlying columns does not match.
+  - Since 12c an index created with INDEXING PARTIAL skips the partitions marked INDEXING OFF; the 11g trick of an unusable partition plus SKIP_UNUSABLE_INDEXES is history.
+source: https://use-the-index-luke.com/sql/where-clause/null/partial-index
+---
+import { Callout, KeyIdea, Check, TryIt } from '@/components/mdx';
+
+Oracle's peculiar handling of NULL in indexes can be turned into something useful: a partial index. All it takes is to make the indexed value NULL for every row that should not be in the index.
+
+## 1. The index to emulate
+
+The target is the queue index from the [partial index lesson](/sql/where-clause/partial-and-filtered-indexes/):
+
+```sql
+CREATE INDEX messages_todo
+          ON messages (receiver)
+       WHERE processed = 'N'
+```
+
+## 2. A function that returns NULL for unwanted rows
+
+The building block is a function whose result is the `RECEIVER` value for unprocessed messages and NULL for everything else:
+
+```sql
+CREATE OR REPLACE
+FUNCTION pi_processed(processed CHAR, receiver NUMBER)
+RETURN NUMBER
+DETERMINISTIC
+AS BEGIN
+   IF processed IN ('N') THEN
+      RETURN receiver;
+   ELSE
+      RETURN NULL;
+   END IF;
+END
+```
+
+The function must be declared [deterministic](/sql/where-clause/functions/user-defined-functions/), as any function used in an index definition must.
+
+## 3. The index and the query
+
+Now the index contains only the rows with `PROCESSED = 'N'`, because for every other row the indexed value is NULL and Oracle writes no entry:
+
+```sql
+CREATE INDEX messages_todo
+          ON messages (pi_processed(processed, receiver))
+```
+
+To use it, the query must contain the indexed expression:
+
+```sql
+SELECT message
+  FROM messages
+ WHERE pi_processed(processed, receiver) = ?
+```
+
+```
+----------------------------------------------------------
+|Id | Operation                   | Name          | Cost |
+----------------------------------------------------------
+| 0 | SELECT STATEMENT            |               | 5330 |
+| 1 |  TABLE ACCESS BY INDEX ROWID| MESSAGES      | 5330 |
+|*2 |   INDEX RANGE SCAN          | MESSAGES_TODO | 5303 |
+----------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+2 - access("PI_PROCESSED"("PROCESSED","RECEIVER")=:X)
+```
+
+<KeyIdea>The optimizer matches a function-based index by its expression. A query written as `processed = 'N' AND receiver = ?` does not use this index, even though it asks for exactly the indexed rows.</KeyIdea>
+
+<Callout kind="warning" title="Common mistake">Adding a second, never-NULL column to the function-based index for sorting or covering. As soon as one indexed column has a value, the row gets an entry, and the index is a full index again. Keep every column inside the function, or keep the index to the one expression.</Callout>
+
+## 4. Partial indexes, part II
+
+Oracle has a second route, which works at the partition level. Since release 12c a partitioned table can switch indexing off for individual partitions (`ALTER TABLE ... MODIFY PARTITION ... INDEXING OFF`), and an index created with `INDEXING PARTIAL` simply has no entries for those partitions:
+
+```sql
+CREATE INDEX messages_todo
+          ON messages (receiver)
+     INDEXING PARTIAL
+```
+
+Which rows stay out is decided by the partition key, so this helps only when the unwanted rows live in partitions of their own, for instance messages partitioned by `PROCESSED`. Before 12c the same effect took a trick no less unsettling than the NULL route: partition the index, make the partition for the unwanted rows deliberately unusable, and set `SKIP_UNUSABLE_INDEXES` so that queries ignore the broken partition instead of failing. For a condition on arbitrary rows, the function-based index above remains the only way.
+
+## 5. Try it
+
+SQLite accepts the same expression index and matches it the same way, so the matching rule can be tried here. One difference does not show in the plan: SQLite stores NULL in its indexes, so its copy of `messages_todo` still has an entry for every row. Only in Oracle is the expression index also the small one. The setup also creates a real partial index for comparison.
+
+<TryIt id="2.6.3" tasks={[
+  { text: 'Run the query with the <code>CASE</code> expression. The plan uses the expression index: <code>USING INDEX messages_todo (&lt;expr&gt;=?)</code>.', sql: 'case\\s+when\\s+processed', plan: 'USING INDEX messages_todo \\(<expr>=\\?\\)' },
+  { text: 'Rewrite the condition as <code>processed = \'N\' AND receiver = 42</code>. The expression index is not matched; SQLite switches to the real partial index <code>messages_todo_real</code>.', sql: "processed\\s*=\\s*'N'\\s+and\\s+receiver", plan: 'USING INDEX messages_todo_real' },
+]} setup={`CREATE TABLE messages (message_id INTEGER PRIMARY KEY, receiver INTEGER NOT NULL, processed TEXT NOT NULL, message TEXT NOT NULL);
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000)
+INSERT INTO messages SELECT i, (i % 97) + 1, CASE WHEN i % 100 = 0 THEN 'N' ELSE 'Y' END, 'message ' || i FROM n;
+CREATE INDEX messages_todo ON messages (CASE WHEN processed = 'N' THEN receiver END);
+CREATE INDEX messages_todo_real ON messages (receiver) WHERE processed = 'N';
+ANALYZE;`} sql={`SELECT message
+  FROM messages
+ WHERE CASE WHEN processed = 'N' THEN receiver END = 42;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 2</summary><div class="d">The optimizer compares expressions textually. A condition on the plain columns is a different expression from the CASE, however equivalent the two are.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT message FROM messages WHERE processed = 'N' AND receiver = 42;
+-- plan: SEARCH messages USING INDEX messages&#95;todo&#95;real (receiver=?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="Oracle has an index on pi_processed(processed, receiver). Which WHERE clause can use it?"
+  options={[
+    "WHERE processed = 'N' AND receiver = 42",
+    'WHERE pi_processed(processed, receiver) = 42',
+    'WHERE receiver = 42',
+  ]}
+  answer={1}
+  explain="A function-based index is matched by its expression. The query has to repeat it; the optimizer does not derive the expression from a condition on the underlying columns, even when the two are logically the same."
+/>

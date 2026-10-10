@@ -1,0 +1,178 @@
+---
+title: SQLite
+subtitle: EXPLAIN QUERY PLAN, the SCAN and SEARCH lines, the column list that shows the access predicate, temp B-trees, automatic indexes, and the playground that runs all of it in your browser.
+section: explain-plan
+order: 6
+summary: Reading SQLite query plans for indexing work. EXPLAIN QUERY PLAN output, SCAN versus SEARCH, USING INDEX, PRIMARY KEY and COVERING INDEX, the (col=?) notation for access predicates, USE TEMP B-TREE, automatic indexes, compound queries, the .eqp shell setting, and how to get actual row counts.
+source: https://use-the-index-luke.com/sql/explain-plan/sqlite/getting-an-execution-plan
+---
+import { Callout } from '@/components/mdx';
+
+## Getting an execution plan
+
+Prefix a statement with `EXPLAIN QUERY PLAN` and SQLite returns a short description of how it will run the statement instead of running it.
+
+```sql
+EXPLAIN QUERY PLAN
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name = 'Winand';
+```
+
+```
+QUERY PLAN
+`--SEARCH employees USING INDEX emp_sub_name (subsidiary_id=? AND last_name=?)
+```
+
+The `sqlite3` shell draws the plan as a tree since version 3.24. Through an API the same information comes back as rows whose `detail` column holds the text shown here. Older versions print `SEARCH TABLE employees` with the word `TABLE`; 3.36 dropped it.
+
+In the shell, `.eqp on` prints the plan before the result of every statement you run, the most convenient setting while experimenting with indexes. `.eqp off` turns it back off.
+
+```
+sqlite> .eqp on
+sqlite> SELECT COUNT(*) FROM sales WHERE sale_date >= '2024-06-01';
+QUERY PLAN
+`--SCAN sales
+15244
+```
+
+SQLite has two levels of plan. Plain `EXPLAIN` without `QUERY PLAN` shows the bytecode of the statement for SQLite's virtual machine, one opcode per line, far too detailed for indexing work; `EXPLAIN QUERY PLAN` is the high-level summary and the only form this page uses. A statement that reads no table at all gets a one-line plan.
+
+```sql
+EXPLAIN QUERY PLAN SELECT RANDOM();
+```
+
+```
+QUERY PLAN
+`--SCAN CONSTANT ROW
+```
+
+The official description of the output format is at sqlite.org/eqp.html.
+
+This site's [playground](/playground/) runs a real SQLite database in the browser, loaded with the example schema, and prints the query plan next to every result. Everything on this page can be tried there.
+
+<Callout kind="warning" title="The plan is an estimate">`EXPLAIN QUERY PLAN` prepares the statement and reports the chosen strategy without executing it. It prints no row counts, no timings and no page reads. The choice depends on the statistics in `sqlite_stat1`, so run `ANALYZE` after loading data or creating an index, or the planner is guessing.</Callout>
+
+## Operations
+
+A SQLite plan has one line per table in the `FROM` clause, in the order the tables are visited. Every join is a nested loop: each line is a loop nested inside the line above it. Extra lines describe sorting, subqueries and temporary structures.
+
+| Line | What it means |
+| --- | --- |
+| `SCAN employees` | Full table scan. Every row in the table is read, in rowid order. |
+| `SEARCH employees USING INDEX emp_sub_name (subsidiary_id=?)` | Index range scan: B-tree traversal to the first matching entry, then a walk along the matching entries, with a table row fetch for each. The columns in parentheses are the access predicate. |
+| `SEARCH employees USING INTEGER PRIMARY KEY (rowid=?)` | Lookup by the rowid, which is the `INTEGER PRIMARY KEY` of a table such as `sales`. The table itself is the B-tree; no separate index is needed. |
+| `SEARCH employees USING PRIMARY KEY (employee_id=? AND subsidiary_id=?)` | Lookup in a `WITHOUT ROWID` table, whose B-tree is keyed by the primary key. For an ordinary table with a multi-column primary key the line says `USING INDEX sqlite_autoindex_employees_1` instead, because SQLite created a separate index for that key. |
+| `SEARCH employees USING COVERING INDEX emp_sub_name (subsidiary_id=?)` | Same search, but every column the statement needs is in the index, so the table is never touched. |
+| `SCAN employees USING COVERING INDEX emp_sub_name` | Full scan of the index in key order instead of the table. Cheaper than a table scan when the index is narrower, or when its order is the one the query asks for. |
+| `SEARCH employees USING AUTOMATIC COVERING INDEX (last_name=?)` | SQLite built a temporary index for this one statement because none existed and it judged repeated scans to be more expensive. The build itself is a full scan. A permanent index would do the same job without the rebuild on every execution. |
+| `USE TEMP B-TREE FOR ORDER BY` | An explicit sort. The result is collected in a temporary B-tree and read back in order. Absent when an index delivers the order. |
+| `USE TEMP B-TREE FOR GROUP BY` | The same for grouping: rows are sorted by the group columns first. Absent when the input arrives in group order from an index. `USE TEMP B-TREE FOR DISTINCT` is the third variant; SQLite needs an index, permanent or temporary, for every `ORDER BY`, `GROUP BY` and `DISTINCT`. |
+| `COMPOUND QUERY`, `UNION ALL`, `UNION`, `EXCEPT`, `INTERSECT` | The parts of a compound statement, each with its own nested plan. Nesting in the tree means a subquery or a compound query, never a join: joins are flat, one line per table. |
+| `MULTI-INDEX OR` | An `OR` across different columns served by one index scan per branch, with results merged. |
+| `BLOOM FILTER ON sales (employee_id=?)` | A filter built on the inner side of a join (3.38 and later) to reject non-matching outer rows before the lookup. |
+| `CO-ROUTINE`, `MATERIALIZE` | A subquery or CTE evaluated on the fly as rows are needed, or computed once into a temporary table. |
+
+There are no hash joins or merge joins. Joining efficiently in SQLite means having an index on the join column of every table except the first.
+
+A `LIMIT` leaves no trace in `EXPLAIN QUERY PLAN`. Whether a top-N query stops early or sorts everything first can only be read indirectly: if the plan shows `USE TEMP B-TREE FOR ORDER BY`, the sort finishes before the limit applies; if not, the rows come out of an index in order and the statement stops after N. The bytecode of plain `EXPLAIN` shows the counter as a `Limit` opcode, which is the only place it is visible.
+
+## Access predicates and filter predicates
+
+SQLite does not print filter predicates at all. The parenthesised list after `USING INDEX` is the full description of what the index does; whatever part of the where clause is missing from it was applied as a filter on the rows the scan produced. Reading the plan therefore means counting columns.
+
+```sql
+CREATE INDEX emp_sub_name ON employees (subsidiary_id, last_name);
+
+EXPLAIN QUERY PLAN
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name = 'Winand';
+```
+
+```
+QUERY PLAN
+`--SEARCH employees USING INDEX emp_sub_name (subsidiary_id=? AND last_name=?)
+```
+
+Both columns are in the list, so both conditions define the range. The question marks stand for the literal values; SQLite prints the plan this way whether the values are constants or bind parameters. The scan reads the 33 entries for (20, Winand) and fetches 33 rows.
+
+```sql
+EXPLAIN QUERY PLAN
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE last_name = 'Winand';
+```
+
+```
+QUERY PLAN
+`--SCAN employees
+```
+
+The index starts with `subsidiary_id`, and nothing in the where clause pins that column, so the index cannot be searched. The condition on `last_name` has vanished from the plan, which is the only way SQLite shows a filter: all 1,000 rows are read and 934 are discarded. That is the plan on a table without statistics, or whenever the leading column has many distinct values.
+
+The playground runs `ANALYZE` when it loads the schema, before any index of yours exists, so the new index has no statistics yet. Run `ANALYZE` again after creating it; its statistics then say that `subsidiary_id` has only three distinct values, and with that knowledge the planner picks a different strategy.
+
+```
+QUERY PLAN
+`--SEARCH employees USING INDEX emp_sub_name (ANY(subsidiary_id) AND last_name=?)
+```
+
+`ANY(subsidiary_id)` is a skip scan: one search for `last_name = 'Winand'` per distinct value of the first column, three in this table. It is a `SEARCH`, but only because the leading column is so repetitive; with a thousand subsidiaries it would be a thousand searches and the planner would go back to the scan. `ANY()` in the column list never means that column narrowed the range.
+
+```sql
+EXPLAIN QUERY PLAN
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name LIKE '%and';
+```
+
+```
+QUERY PLAN
+`--SEARCH employees USING INDEX emp_sub_name (subsidiary_id=?)
+```
+
+Only `subsidiary_id` appears. The range covers all 500 entries of subsidiary 20, and the `LIKE` is checked on each of them. Because `last_name` is in the index, SQLite can reject the 467 non-matching entries before fetching their rows; a condition on a column outside the index would be checked after the fetch. Neither case is visible in the plan.
+
+Range conditions show up with inequality signs.
+
+```sql
+EXPLAIN QUERY PLAN
+SELECT first_name, last_name
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name BETWEEN 'A' AND 'M';
+```
+
+```
+QUERY PLAN
+`--SEARCH employees USING INDEX emp_sub_name (subsidiary_id=? AND last_name>? AND last_name<?)
+```
+
+`last_name>?` and `last_name<?` are the start and stop of the leaf walk. A `LIKE 'Win%'` would produce the same pair of bounds, but only if the column's collation and the `case_sensitive_like` pragma agree: by default a `TEXT` column uses the `BINARY` collation and `LIKE` is case-insensitive, so the optimization does not apply and the `LIKE` becomes a filter. Declaring the column `COLLATE NOCASE`, or using `GLOB` instead, restores the range.
+
+<Callout kind="important" title="Count the columns">The number of columns in the parentheses tells you how many index columns narrow the range. If it is smaller than the number of conditions in the where clause, the rest is filtered. If the line says `SCAN`, everything is filtered.</Callout>
+
+## Reading the numbers
+
+The plan has none. SQLite puts no estimates into `EXPLAIN QUERY PLAN` output, so the comparison of estimated and actual rows that other engines allow has to be done by hand.
+
+The planner's estimates live in `sqlite_stat1`, filled by `ANALYZE`. One row per index gives the number of entries and, for each prefix of the index, the average number of entries per distinct value.
+
+```sql
+ANALYZE;
+SELECT * FROM sqlite_stat1 WHERE idx = 'emp_sub_name';
+```
+
+```
+employees|emp_sub_name|1000 334 34
+```
+
+Read it as: 1,000 entries; about 334 per distinct `subsidiary_id`; about 34 per distinct (`subsidiary_id`, `last_name`) pair. These averages are what makes the planner prefer the index for the two-column query, and what tells it that a skip scan over three subsidiaries is affordable when only `last_name` is given. If an index is ignored although it should help, this table usually explains why.
+
+For actual counts, the shell offers `.scanstats on` when it was compiled with `SQLITE_ENABLE_STMT_SCANSTATUS`. It then prints, after each statement, the number of loops and rows for every line of the plan, with the estimated rows next to them. Without that option, `.timer on` gives wall-clock time per statement, and the `sqlite3_stmt_status` API exposes counters such as the number of full-scan steps and sorts an application can read after each statement.
+
+In the playground, the practical approach is to compare plans rather than numbers: add the index, rerun the statement, and watch `SCAN` turn into `SEARCH` and the column list in parentheses grow to include every condition in the where clause.

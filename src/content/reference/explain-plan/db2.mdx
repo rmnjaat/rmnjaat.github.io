@@ -1,0 +1,287 @@
+---
+title: Db2 (LUW)
+subtitle: EXPLAIN PLAN FOR with db2exfmt and db2expln, the IXSCAN, FETCH and TBSCAN operators, and how start/stop keys differ from sargable predicates.
+section: explain-plan
+order: 5
+summary: Reading Db2 for Linux, UNIX and Windows execution plans for indexing work. The explain tables, db2exfmt, db2expln and the last_explained view, the access plan graph, IXSCAN, FETCH, TBSCAN, RIDSCN, IXAND, the join and sort operators, START and STOP key predicates versus SARG predicates, and timeron costs.
+source: https://use-the-index-luke.com/sql/explain-plan/db2/getting-an-execution-plan
+---
+import { Callout } from '@/components/mdx';
+
+## Getting an execution plan
+
+Db2 stores plans in a set of explain tables that must exist before anything else works. Create them once per database.
+
+```sql
+CALL SYSPROC.SYSINSTALLOBJECTS('EXPLAIN', 'C',
+     CAST(NULL AS VARCHAR(128)), CAST(NULL AS VARCHAR(128)));
+```
+
+Then `EXPLAIN PLAN FOR` compiles a statement, writes its plan to those tables and does not run it.
+
+```sql
+EXPLAIN PLAN FOR
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name = 'Winand';
+```
+
+The plan is read back with the `db2exfmt` command-line tool, which formats the latest explained statement when given `-1` for the defaults.
+
+```
+db2exfmt -d UTIL -1 -o plan.txt
+```
+
+The output file has several parts: the original and the optimized statement, the access plan as a graph, a numbered "Plan Details" section with the predicates of each operator, and the objects used. The access predicate discussion below relies on the details section, so keep the whole file rather than only the graph. To explain every statement a session runs without editing it, set `SET CURRENT EXPLAIN MODE EXPLAIN` beforehand; the statements are then explained but not executed.
+
+`db2expln` is the alternative for a quick look at a single statement or at the plans stored in a package.
+
+```
+db2expln -d UTIL -terminal -graph -statement "SELECT first_name, last_name, phone_number FROM employees WHERE subsidiary_id = 20 AND last_name = 'Winand'"
+```
+
+It prints a prose description of each access, including the number of key columns used, and with `-graph` a tree as well. It does not need the explain tables.
+
+### The last_explained view
+
+Both IBM tools produce long files. Markus Winand published a view, `last_explained`, that reads the explain tables and prints the most recently explained statement of the current user in the compact style of Oracle's `DBMS_XPLAN`: one row per operator with `ID`, `Operation`, `Rows` and `Cost`, followed by a `Predicate Information` section. After the explain tables exist and the view is installed, getting a plan is two statements.
+
+```sql
+EXPLAIN PLAN FOR
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name = 'Winand';
+
+SELECT * FROM last_explained;
+```
+
+```
+Explain Plan
+-------------------------------------------------------------
+ID | Operation               |                 Rows | Cost
+ 1 | RETURN                  |                      |   14
+ 2 |  FETCH EMPLOYEES        |   33 of 33   (100.00%) |   14
+ 3 |   IXSCAN EMP_SUB_NAME   |   33 of 1000 (  3.30%) |    7
+
+Predicate Information
+ 3 - START (Q1.SUBSIDIARY_ID = 20)
+     START (Q1.LAST_NAME = 'Winand')
+     STOP  (Q1.SUBSIDIARY_ID = 20)
+     STOP  (Q1.LAST_NAME = 'Winand')
+
+Explain plan by Markus Winand - NO WARRANTY
+http://use-the-index-luke.com/s/last_explained
+```
+
+`Rows` shows the estimated output of the operator against the estimated input, with the percentage that survives. Operator arguments that matter for reading the plan are printed in brackets after the name: the grouping mode of `GRPBY`, `UNIQUE` or `TOP-N` on a `SORT`, `REVERSE` on an `IXSCAN`, the join type. When section actuals are available an `ActualRows` column appears next to the estimates; that extension was contributed by Ember Crooks. The view needs Db2 (LUW) 9.7 FixPack 4 or later, assumes the explain tables live in `SYSTOOLS`, and is labelled experimental and without warranty by its author. The source is on GitHub in the repository `fatalmind/DB2-last-explained`. The predicate labels it uses, `START`, `STOP` and `SARG`, are the ones the rest of this page refers to.
+
+<Callout kind="note" title="Plans that already ran">A statement in the package cache can be explained after the fact with the `EXPLAIN_FROM_SECTION` procedure, which writes its stored plan into the explain tables for `db2exfmt` to format. With the `section_actuals` database configuration parameter on and an activity event monitor, `EXPLAIN_FROM_ACTIVITY` adds the actual row counts of one execution to that plan.</Callout>
+
+## Operations
+
+The access plan graph is drawn bottom-up: tables and indexes are at the bottom, `RETURN` is at the top, and each box shows the estimated rows above it, the operator name with its number, and the cumulative cost and I/O below it. The number in parentheses links the box to its entry in the Plan Details.
+
+| Operation | What it means |
+| --- | --- |
+| `IXSCAN` | Index scan. With start and stop keys it is a B-tree traversal and a walk along the leaf pages between them; without them it is a scan of the whole index. Covers unique lookups, ranges and full index scans. `IXSCAN (REVERSE)` walks the leaf chain backwards, for a descending `ORDER BY` on an ascending index. |
+| `FETCH` | Reads the table row that an index entry points to. Appears above an `IXSCAN`, one fetch per row identifier. Absent when the index covers all needed columns (index-only access). |
+| `TBSCAN` | Full table scan. Also appears above a `SORT` or `TEMP` to read a temporary result. |
+| `RIDSCN` | Collects row identifiers from one or more index scans, sorts them into page order, and hands them to a `FETCH`. Used for list prefetch and for ORed index conditions. |
+| `IXAND` | Combines several index scans with a dynamic bitmap, keeping the row identifiers that appear in all of them. Usually a hint that one concatenated index would do better. |
+| `NLJOIN` | Nested loops join. For each row of the outer (left) input, runs the inner (right) input, usually an `IXSCAN`. |
+| `HSJOIN` | Hash join. Builds a hash table from the inner input and probes it with the outer. Indexes on the join columns are not involved. |
+| `MSJOIN` | Merge join on two inputs sorted on the join key. |
+| `ZZJOIN` | Zigzag join: a join of more than two tables at once, built for star schemas in data warehouses. Every other join operator takes exactly two inputs, so a query with several joins is a chain of them, and the "table" on one side of a join is often the intermediate result of the previous one. |
+| `SORT` | Explicit sort for `ORDER BY`, `GROUP BY`, `DISTINCT` or a merge join input. It materializes its whole input, so it needs memory in proportion to the rows and is not pipelined; a sort that overflows the sort heap spills to a temporary table space. `SORT (UNIQUE)` removes duplicates while sorting; `SORT (TOP-N)` keeps only the first N rows for a `FETCH FIRST n ROWS ONLY`. |
+| `GRPBY` | Grouping and aggregation. Takes sorted input, from a `SORT` or from an `IXSCAN`; in the latter case no sort appears in the plan. Since Db2 10.1 it can also group through a hash table, shown as `GRPBY (HASH COMPLETE)`, which needs no order but produces none either. |
+| `UNIQUE` | Duplicate elimination for `DISTINCT` when not done by sorting. |
+| `FILTER` | A predicate applied as a separate step, after the row has been produced by the operator below. |
+| `TEMP` | Materializes an intermediate result in a temporary table. |
+| `RETURN` | The top of every plan: passes rows to the application. Its cost is the total cost of the statement. |
+
+Db2 has no operator for a top-N limit. When a sort is involved the `SORT (TOP-N)` argument gives it away. When the order comes from an index, the only trace of a `FETCH FIRST n ROWS ONLY` is a sudden drop in the estimated rows, or in the cost, between two operators that have no predicate between them.
+
+## Access predicates and filter predicates
+
+Db2 sorts the predicates of each operator into classes, and the Plan Details section names the class next to every predicate. On an `IXSCAN`, a **Start Key Predicate** and a **Stop Key Predicate** define where the leaf-level walk begins and ends; those are the access predicates, and `last_explained` abbreviates them to `START` and `STOP`. A **Sargable Predicate** (`SARG`) on the same `IXSCAN` is evaluated against each index entry in that range but does not narrow it. A **Sargable Predicate** on the `FETCH` is evaluated after the row was read from the table. A **Residual Predicate** is evaluated last, outside the data access.
+
+The word deserves a warning. "Sargable" is short for search argument, and in IBM's original usage it meant a predicate simple enough for the data access operator to evaluate. In most other databases the word has come to mean "can use an index", which is the opposite of what it tells you here: in a Db2 plan a `SARG` predicate is a filter, on the index or on the table, and IBM's own documentation says that index-sargable predicates are not used to bracket the search.
+
+```sql
+CREATE INDEX emp_sub_name ON employees (subsidiary_id, last_name);
+
+EXPLAIN PLAN FOR
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name = 'Winand';
+```
+
+```
+Access Plan:
+-----------
+        Total Cost:             13.70
+        Query Degree:           1
+
+              Rows
+             RETURN
+             (   1)
+              Cost
+               I/O
+               |
+               33
+             FETCH
+             (   2)
+             13.70
+                2
+           /----+----\
+         33          1000
+       IXSCAN    TABLE: DBUSER
+       (   3)      EMPLOYEES
+       6.85          Q1
+         1
+         |
+        1000
+    INDEX: DBUSER
+    EMP_SUB_NAME
+        Q1
+```
+
+The graph says what happens but not which predicate did what. That is in the details of operator 3.
+
+```
+	3) IXSCAN: (Index Scan)
+		...
+		Predicates:
+		----------
+		2) Start Key Predicate
+			Comparison Operator: 		Equal (=)
+			...
+			Predicate Text:
+			--------------
+			(Q1.SUBSIDIARY_ID = 20)
+
+		2) Stop Key Predicate
+			...
+			(Q1.SUBSIDIARY_ID = 20)
+
+		3) Start Key Predicate
+			...
+			(Q1.LAST_NAME = 'Winand')
+
+		3) Stop Key Predicate
+			...
+			(Q1.LAST_NAME = 'Winand')
+```
+
+Both conditions are start and stop keys. The index scan begins at the first entry for (20, Winand) and ends at the last; it reads 33 entries and causes 33 fetches.
+
+Without the condition on `subsidiary_id` the index has no usable leading column. The optimizer reads the table and applies the condition as a sargable predicate of the `TBSCAN`.
+
+```
+         66
+       TBSCAN
+       (   2)
+       ...
+         |
+        1000
+    TABLE: DBUSER
+      EMPLOYEES
+```
+
+```
+	2) TBSCAN: (Table Scan)
+		...
+		Predicates:
+		----------
+		2) Sargable Predicate
+			Comparison Operator: 		Equal (=)
+			...
+			(Q1.LAST_NAME = 'Winand')
+```
+
+If the optimizer chooses the index anyway, because it is much narrower than the table, the `IXSCAN` entry has no start or stop key at all and the condition is listed as a sargable predicate: the whole index is read and each entry is compared. Db2 also has a jump scan that can skip over the distinct values of a leading column when there are few of them; the details section calls that out when it applies.
+
+The `LIKE` with a leading wildcard shows the split within one operator.
+
+```sql
+EXPLAIN PLAN FOR
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name LIKE '%and';
+```
+
+```
+	3) IXSCAN: (Index Scan)
+		...
+		Predicates:
+		----------
+		2) Start Key Predicate
+			...
+			(Q1.SUBSIDIARY_ID = 20)
+
+		2) Stop Key Predicate
+			...
+			(Q1.SUBSIDIARY_ID = 20)
+
+		3) Sargable Predicate
+			Comparison Operator: 		Like (LIKE)
+			...
+			(Q1.LAST_NAME LIKE '%and')
+```
+
+`subsidiary_id = 20` sets the start and stop keys, so the scan covers all 500 entries of that subsidiary. The `LIKE` is sargable on the index: it is checked on each entry and the 467 that fail never reach the `FETCH`. The leaf pages are read in full nonetheless. A condition on a column that is not in the index would instead appear as a sargable predicate of the `FETCH` operator, which means every one of the 500 rows is fetched before being tested.
+
+In `last_explained` the same plan reads:
+
+```
+ 3 - START (Q1.SUBSIDIARY_ID = 20)
+     STOP  (Q1.SUBSIDIARY_ID = 20)
+     SARG  (Q1.LAST_NAME LIKE '%and')
+```
+
+Three reading rules follow. `START` and `STOP` appear only on an `IXSCAN`; `SARG` can appear on any data access, a `TBSCAN` included. An `IXSCAN` with only a `START` or only a `STOP` is a one-sided range such as `sale_date > ?`. An `IXSCAN` with neither reads the whole index, however many `SARG` predicates it lists.
+
+`db2expln` makes the same distinction with a count rather than with classes.
+
+```
+Access Table Name = DBUSER.EMPLOYEES  ID = 2,5
+|  Index Scan:  Name = DBUSER.EMP_SUB_NAME  ID = 1
+|  |  Index Columns:
+|  |  |  1: SUBSIDIARY_ID (Ascending)
+|  |  |  2: LAST_NAME (Ascending)
+|  #Key Columns = 1
+|  |  Start Key: Inclusive Value
+|  |  |  1: 20
+|  |  Stop Key: Inclusive Value
+|  |  |  1: 20
+|  Index-Only Access: No
+|  Sargable Index Predicate(s)
+|  |  Predicate(s):
+|  |  |  LAST_NAME LIKE '%and'
+```
+
+`#Key Columns = 1` out of two index columns: one column narrows the range, the other is filtered. For the equality query the same line reads `#Key Columns = 2` and the sargable section is empty.
+
+<Callout kind="important" title="Sargable is not the same as access">Db2 calls a predicate sargable whenever the data access operator can evaluate it, including a `LIKE '%and'` on an index column. Sargable predicates still read every entry in the range. Only start and stop keys shrink the range. When you want to know whether an index is used well, count the key columns, not the sargable predicates.</Callout>
+
+<Callout kind="warning" title="A filter on an index column is still a filter">An `IXSCAN` on the right index with a `SARG` doing the work reads a range that grows with the table. The amount of work can exceed the number of rows returned by orders of magnitude, and nothing in the operator name warns you. The [data volume lesson](/sql/testing-scalability/data-volume/) shows what that looks like in production.</Callout>
+
+## Reading the numbers
+
+Db2 expresses cost in **timerons**, a unit-less blend of estimated CPU and I/O work. Timerons are only comparable between plans of the same statement on the same system; they are not milliseconds. Each operator in the details section shows a `Cumulative Total Cost` (the operator and everything below it), a `Cumulative CPU Cost`, a `Cumulative I/O Cost` in estimated page reads, and a `Cumulative First Row Cost`. The first-row cost is the one to watch for queries with `FETCH FIRST n ROWS ONLY`: a plan that is cheap in total but expensive to the first row is sorting before it can return anything.
+
+The number above each box in the graph is the estimated cardinality, the rows the operator is expected to produce. Compare the cardinality above the `IXSCAN` with the cardinality above the `FETCH` and above `RETURN`. If they drop sharply from one operator to the next, the operator in between is discarding rows, and the predicate that does the discarding is the one to move into the index.
+
+The explain tables hold estimates. For actual counts, the cheapest source is the package cache.
+
+```sql
+SELECT rows_read, rows_returned, total_act_time
+  FROM TABLE(MON_GET_PKG_CACHE_STMT('D', NULL, NULL, -1))
+ WHERE stmt_text LIKE '%last_name LIKE%';
+```
+
+`rows_read` counts rows and index entries examined; `rows_returned` counts rows delivered. A ratio far above one is the fingerprint of a sargable or residual predicate doing the work that a start/stop key should do. Section actuals, obtained through `EXPLAIN_FROM_ACTIVITY`, put the same actual counts next to each operator in the `db2exfmt` output.

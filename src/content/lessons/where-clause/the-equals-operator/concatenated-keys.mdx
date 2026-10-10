@@ -1,0 +1,228 @@
+---
+title: Concatenated Keys
+subtitle: An index on two columns is sorted by the first one. Put the columns in the wrong order and half of your queries cannot use it.
+chapter: where-clause
+order: 1.2
+kind: lesson
+minutes: 11
+summary: Why a concatenated index only serves queries that cover its leading columns, how a merger turns a working primary key into a full table scan, why reversing the column order fixes it, and why one well-ordered index beats two.
+prereqs: "You should have read <a href='/sql/where-clause/the-equals-operator/primary-keys/'>Primary Keys</a> and be able to find the index name and the access condition in an execution plan."
+outcomes:
+  - How the entries of a multi-column index are sorted
+  - Why a query on the second column alone cannot use the index
+  - When a full table scan is the right choice and when it is a trap
+  - How to pick the column order so that one index serves several queries
+  - Why developers, not consultants or DBAs, are best placed to choose it
+recap:
+  - A concatenated index is one B-tree over several columns. It is sorted by the first column; later columns only order the entries that agree on the earlier ones.
+  - The index is usable when the where clause covers its leading columns. Any prefix works; a query on a trailing column alone does not.
+  - Put the column that is also queried on its own first. One index then serves both queries, and the full-key lookup stays a unique scan.
+  - A second index would work too, but it costs space and slows every insert, update and delete. Prefer one index with the right column order.
+  - Choosing the order needs knowledge of the application's where clauses. That knowledge lives with developers.
+source: https://use-the-index-luke.com/sql/where-clause/the-equals-operator/concatenated-keys
+---
+import { Callout, KeyIdea, EngineTabs, Check, TryIt, ConcatIndex } from '@/components/mdx';
+
+The database creates the primary key index on its own, but when the key spans several columns there is still a decision to make. The index then covers all key columns at once: a **concatenated index**, also called a multi-column, composite or combined index. The order of its columns decides which queries can use it, and the database will not choose that order for you.
+
+## 1. The merger
+
+Suppose the company buys another one and its staff are loaded into `employees`, making the table ten times as large. Both firms numbered their employees from one, so `employee_id` alone no longer identifies a row. The key needs a second column, `subsidiary_id`, to make it unique again, and the index behind the primary key becomes:
+
+```sql
+CREATE UNIQUE INDEX employees_pk
+    ON employees (employee_id, subsidiary_id)
+```
+
+A lookup for one employee now has to supply both columns.
+
+```sql
+SELECT first_name, last_name
+  FROM employees
+ WHERE employee_id   = 123
+   AND subsidiary_id = 30
+```
+
+Whenever the where clause covers the complete primary key, the database can use an `INDEX UNIQUE SCAN`, no matter how many columns the key has. So far nothing is lost.
+
+## 2. The query that cannot use the index
+
+Then someone asks for all employees of one subsidiary.
+
+```sql
+SELECT first_name, last_name
+  FROM employees
+ WHERE subsidiary_id = 20
+```
+
+The plan shows a `TABLE ACCESS FULL`. The database reads the whole table and tests every row against the condition. The time this takes grows with the table: make the table ten times larger and the scan takes ten times as long. That is what makes it dangerous. On a small development database it is fast enough to pass unnoticed, and in production it is a serious problem.
+
+<Callout kind="note" title="Full table scan">A `TABLE ACCESS FULL` is not always the wrong choice. When a query needs a large share of the table it can be the most efficient operation. Part of the reason is that it skips the index lookup entirely. The bigger part is how it reads: an index lookup reads one block, processes it, and only then knows which block comes next. A full scan knows it needs everything, so it fetches large chunks in one go (a multi-block read). It touches more data but may issue far fewer read operations.</Callout>
+
+The index was not used because a concatenated index cannot be used by any column you happen to pick. To see why, look at how it is sorted.
+
+## 3. How a concatenated index is sorted
+
+A concatenated index is a B-tree like any other, and like any other it keeps its entries in a sorted list. The columns are applied in the order of the index definition. The first column is the primary sort criterion. The second column only orders entries that share the same value in the first, and so on down the list.
+
+<Callout kind="important">One B-tree, several columns. There is no second tree hiding behind the second column.</Callout>
+
+That makes a two-column index behave like a telephone directory, which is sorted by surname and, within one surname, by first name. You can find everyone called Winand. You cannot find everyone called Markus without reading the whole book. Searching the second column of an index alone is the same thing. Switch the figure between the two column orders and watch where the entries for subsidiary 20 end up.
+
+<ConcatIndex client:visible n="2.2" />
+
+With `employee_id` first, the entries for subsidiary 20 are spread across the leaf nodes: four entries, under 123, 124, 126 and 127. Worse, the branch nodes contain no `subsidiary_id = 20` at all; the value only exists inside the leaves. The tree has no path to follow, so it is useless for this query.
+
+<Callout kind="tip" title="Look at the index">The easiest way to understand which queries an index supports is to look at its contents in index order. Put the index columns and the table name into the query below and you get a sample of the index. Then ask whether the rows your query needs sit together in one place. If they do not, the tree cannot lead the database to them.</Callout>
+
+```sql
+SELECT <INDEX COLUMN LIST>
+  FROM <TABLE>
+ ORDER BY <INDEX COLUMN LIST>
+ FETCH FIRST 100 ROWS ONLY
+```
+
+The `FETCH FIRST` clause is SQL:2008 syntax; [top-N queries](/sql/partial-results/top-n-queries/) lists the `LIMIT`, `TOP` and `ROWNUM` variants.
+
+## 4. Reverse the column order
+
+One fix is a second index on `subsidiary_id`. There is a better one, provided that nobody needs to search by `employee_id` alone after the merger, which is a fair assumption now that the number is ambiguous.
+
+The first column of an index is always usable on its own: you do not need a first name to search a directory by surname. So swap the columns and put `subsidiary_id` first.
+
+```sql
+CREATE UNIQUE INDEX employees_pk
+    ON employees (subsidiary_id, employee_id)
+```
+
+The two columns together are as unique as before, so the full-key lookup still gets its `INDEX UNIQUE SCAN`. What changes is the order of the entries. `subsidiary_id` is now the primary sort criterion, all entries for one subsidiary sit next to each other, and the tree can find where they start.
+
+<Callout kind="important">The single most important decision about a concatenated index is the column order, because it decides how many queries can use the index.</Callout>
+
+The plan confirms that the reversed index is used. `subsidiary_id` on its own is not unique, so the database has to follow the leaf chain to collect every matching entry: an `INDEX RANGE SCAN`.
+
+<EngineTabs>
+  <Fragment slot="db2">
+  ```
+  Explain Plan
+  -------------------------------------------------------------
+  ID | Operation               |                    Rows | Cost
+   1 | RETURN                  |                         |  128
+   2 |  FETCH EMPLOYEES        |  1195 of 1195 (100.00%) |  128
+   3 |   RIDSCN                |  1195 of 1195 (100.00%) |   43
+   4 |    SORT (UNIQUE)        |  1195 of 1195 (100.00%) |   43
+   5 |     IXSCAN EMPLOYEES_PK | 1195 of 10000 ( 11.95%) |   43
+
+  Predicate Information
+   2 - SARG (Q1.SUBSIDIARY_ID = +00002.)
+   5 - START (Q1.SUBSIDIARY_ID = +00002.)
+        STOP (Q1.SUBSIDIARY_ID = +00002.)
+  ```
+
+  More operations than before, but the familiar two are still there: `IXSCAN` is the range scan and `FETCH` the table access. Between them, `SORT (UNIQUE)` orders the index results by the physical location of the rows in the table, and `RIDSCN` prefetches the pages they live on, merging adjacent blocks into a single I/O.
+  </Fragment>
+  <Fragment slot="mysql">
+  ```
+  +----+-----------+------+---------+---------+------+-------+
+  | id | table     | type | key     | key_len | rows | Extra |
+  +----+-----------+------+---------+---------+------+-------+
+  |  1 | employees | ref  | PRIMARY |       5 |  123 |       |
+  +----+-----------+------+---------+---------+------+-------+
+  ```
+
+  The access type `ref` is MySQL's counterpart of Oracle's `INDEX RANGE SCAN`: an equality lookup that can return several rows.
+  </Fragment>
+  <Fragment slot="oracle">
+  ```
+  ---------------------------------------------------------------
+  |Id |Operation                   | Name         | Rows | Cost |
+  ---------------------------------------------------------------
+  | 0 |SELECT STATEMENT            |              |  106 |   75 |
+  | 1 | TABLE ACCESS BY INDEX ROWID| EMPLOYEES    |  106 |   75 |
+  |*2 |  INDEX RANGE SCAN          | EMPLOYEES_PK |  106 |    2 |
+  ---------------------------------------------------------------
+
+  Predicate Information (identified by operation id):
+  ---------------------------------------------------
+     2 - access("SUBSIDIARY_ID"=20)
+  ```
+
+  `INDEX RANGE SCAN` with `subsidiary_id` as its access predicate, then one `TABLE ACCESS BY INDEX ROWID` for the estimated 106 rows.
+  </Fragment>
+  <Fragment slot="postgresql">
+  ```
+                   QUERY PLAN
+  ----------------------------------------------
+   Bitmap Heap Scan on employees
+   (cost=24.63..1529.17 rows=1080 width=13)
+     Recheck Cond: (subsidiary_id = 2::numeric)
+     -> Bitmap Index Scan on employees_pk
+        (cost=0.00..24.36 rows=1080 width=0)
+        Index Cond: (subsidiary_id = 2::numeric)
+  ```
+
+  Two operations this time. `Bitmap Index Scan` and `Bitmap Heap Scan` roughly match Oracle's range scan and table access, with one difference in the order of work: PostgreSQL first collects every matching entry from the index, sorts them by where the rows sit in the heap, and only then reads the table. That turns scattered single-block reads into something closer to sequential I/O.
+  </Fragment>
+  <Fragment slot="sql-server">
+  ```
+  |--Nested Loops(Inner Join)
+     |--Index Seek(OBJECT:employees_pk,
+     |               SEEK:subsidiary_id=20
+     |            ORDERED FORWARD)
+     |--RID Lookup(OBJECT:employees,
+                     SEEK:Bmk1000=Bmk1000
+                   LOOKUP ORDERED FORWARD)
+  ```
+
+  `Index Seek` on `subsidiary_id` feeds each ROWID into the `RID Lookup` through the `Nested Loops` operator.
+  </Fragment>
+</EngineTabs>
+
+## 5. The rule, and the price of a second index
+
+In general a concatenated index can be used when the where clause covers its leading, that is leftmost, columns. An index on three columns serves a search on the first column, a search on the first two, and a search on all three. It does not serve a search that skips the first.
+
+<KeyIdea>Any prefix of the index columns works. A column in the middle or at the end, on its own, does not.</KeyIdea>
+
+The two-index alternative would also have given good select performance. The single index is still the better choice. It needs no extra storage and no extra maintenance, and that maintenance is paid on every write: the fewer indexes a table carries, the faster its inserts, deletes and updates run. [Unit 8](/sql/dml/) puts numbers on that cost.
+
+<Callout kind="warning" title="Common mistake">Expecting the optimizer to rearrange the index. The sort order is fixed when the index is built. The order of conditions in the `WHERE` clause does not matter; the order of columns in the index definition is everything.</Callout>
+
+## 6. Who should choose the column order
+
+Defining the best index takes more than knowing how indexes work. It takes knowing how the application queries the table: which column combinations actually appear in where clauses.
+
+That is why an external consultant struggles with it. They see one query at a time and have no overview of the application's access paths, so they cannot weigh what an index would do for the other queries. Database administrators are in a similar spot: they know the schema, but not how the code uses it. The one place where database knowledge and knowledge of the business domain meet is the development team. Developers have a feel for the data and know the access paths, and they can get the column order right for the whole application without much effort.
+
+## 7. Try it
+
+The playground table has its primary key on `(employee_id, subsidiary_id)`, the merger order. SQLite cannot reorder a primary key in place, so you will add a second index with the columns the other way round to stand in for the reversed key.
+
+<TryIt id="2.2" tasks={[
+  { text: 'Run the subsidiary query as it is. The plan says <code>SCAN employees</code>: no index.', sql: 'subsidiary_id\\s*=\\s*20', plan: '^SCAN employees' },
+  { text: 'Create an index <code>emp_sub_id</code> on <code>(subsidiary_id, employee_id)</code>.', sql: 'create\\s+index\\s+emp_sub_id\\s+on\\s+employees\\s*\\(\\s*subsidiary_id\\s*,\\s*employee_id\\s*\\)' },
+  { text: 'Run the same query again. It now reads <code>SEARCH employees USING INDEX emp_sub_id (subsidiary_id=?)</code>.', sql: 'subsidiary_id\\s*=\\s*20', plan: 'USING INDEX emp_sub_id \\(subsidiary_id=\\?\\)' },
+]} sql={`SELECT first_name, last_name
+  FROM employees
+ WHERE subsidiary_id = 20;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 2</summary><div class="d">Run the <code>CREATE INDEX</code> statement on its own first, then put the query back and run it again. The playground keeps the index until you reload the page.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX emp&#95;sub&#95;id ON employees (subsidiary&#95;id, employee&#95;id);
+SELECT first&#95;name, last&#95;name FROM employees WHERE subsidiary&#95;id = 20;
+-- plan: SEARCH employees USING INDEX emp&#95;sub&#95;id (subsidiary&#95;id=?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+Afterwards, change the condition to `employee_id = 123`. The new index is useless for it, but the primary key index still covers that prefix, so the plan is still a `SEARCH`.
+
+<Check
+  client:visible
+  question="Two queries run against employees: one filters on employee_id and subsidiary_id, the other on subsidiary_id alone. Which single index serves both?"
+  options={[
+    '(employee_id, subsidiary_id)',
+    '(subsidiary_id, employee_id)',
+    'Either. The optimizer rearranges the columns as needed.',
+  ]}
+  answer={1}
+  explain="An index is usable when the where clause covers its leading columns. Both queries cover subsidiary_id, so it must come first. The full-key query covers both columns and works with either order. The optimizer cannot rearrange an index; the sort order is fixed when the index is built."
+/>

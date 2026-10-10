@@ -1,0 +1,35 @@
+---
+title: SELECT * Is Bad
+subtitle: The star is not the problem. Fetching columns you do not need is, and listing all of them by name costs just as much.
+section: myth-directory
+order: 5
+summary: Why SELECT * is slow only when the columns are not needed, what the real costs of extra columns are (up to a hundredfold for a lost index-only scan, up to fivefold for sort memory), and why naming every column instead of using the star changes nothing.
+source: https://use-the-index-luke.com/blog/2013-08/its-not-about-the-star-stupid
+---
+import { Callout } from '@/components/mdx';
+
+The claim: `SELECT *` is a performance bug, and replacing the star with an explicit column list makes the query faster.
+
+## Why people believe it
+
+The advice has a true core. Queries that fetch everything from five joined tables are slower than queries that fetch three columns, and people who trimmed a column list and saw a query speed up took away a lesson about syntax. Style guides reinforce it: an explicit list is more readable, survives schema changes better, and makes dependencies visible. Those are good reasons to avoid the star in production code. They are not performance reasons.
+
+## What actually happens
+
+The database resolves `*` to the column list at parse time and executes the same plan it would for the expanded list. A query that names all seven columns of `sales` costs exactly what `SELECT * FROM sales` costs. The question that matters is which columns the statement reads, and there are three places where extra columns cost real time.
+
+The first is the index-only scan, and it is the big one. A typical table read has two steps: the index finds the rows, then each row is fetched from the table. If a query needs only `sale_date` and `eur_value`, an index on `(sale_date, eur_value)` can answer it without the second step. The index stores the matching entries next to each other, so one block read yields on the order of a hundred of them, depending on how wide the indexed columns are. The table does not: the rows a query wants are scattered among rows it does not, so a block read from the table often yields one useful row. That is the arithmetic behind "up to a hundred times slower": add `product_id` to the select list, or select everything, and the table has to be visited for every row. Columns stored out of line, Oracle's LOBs for instance, cost yet another read each. The [index-only scan lesson](/sql/clustering/index-only-scan-covering-index/) covers what this costs and when it is worth building such an index, and the [index-organized table lesson](/sql/clustering/index-organized-clustered-index/) covers the exception where the table itself is sorted.
+
+The second is memory on the server. Most of the time the database streams rows to the client as it finds them and holds nothing back. Some operations cannot: a sort has to keep every selected column of every row until the last one has arrived, and a hash join builds an in-memory table from one side of the join that holds every selected column of every row on that side. Selecting fewer columns makes those structures smaller, keeps them in memory instead of spilling to disk, and sometimes changes the optimizer's choice of join algorithm. The effect is real but bounded: in the author's experience a sort typically gets about twice as fast when unused columns are dropped, and never more than about five times. The [hash join lesson](/sql/join/hash-join-partial-objects/) has the details and the ORM side of it.
+
+The third is transfer. Every selected column of every row is serialized, sent over the network and deserialized, and on the client side it occupies memory and keeps the garbage collector busy. Wide text and binary columns dominate this cost, and an ORM that maps every column pays it on every entity it loads.
+
+None of these costs is caused by the star. All of them are caused by columns that nobody reads. The star is only the most visible symptom of selecting everything without thinking about it, which is what most ORM tools do by default, and an ORM that lists the forty columns by name instead of writing `*` has the identical problem. The original post's title says it in five words: it's not about the star.
+
+## What to do instead
+
+Select the columns the code uses. In hand-written SQL that means a list, which happens to also satisfy the style guide. In an ORM it means fetching projections or lightweight entities for lists and screens, and reserving full entity loads for the cases that need every field, which is usually the edit form.
+
+When a query is in the hot path, look at whether the columns it selects could all come from one index. If they almost can, consider adding the missing column to the index to get an index-only scan. That decision is about which columns are selected, and the star hides the answer, which is the one real argument against it.
+
+<Callout kind="note">`SELECT *` in a subquery or a view definition is also harmless when the outer query selects fewer columns. Optimizers prune columns that are never used further up, so the inner star does not force the extra reads.</Callout>

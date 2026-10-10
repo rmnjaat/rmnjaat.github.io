@@ -1,0 +1,188 @@
+---
+title: "Practice: equality, column order and functions"
+subtitle: Five exercises in the playground. A primary key lookup, a query that misses the key, the column order that fixes it, an index on UPPER(last_name), and the index you should not have created.
+chapter: where-clause
+order: 3.5
+kind: practice
+minutes: 18
+summary: Hands-on exercises for the first half of the where-clause unit. Read the plan of a primary key lookup, watch a query on a trailing key column scan the table, fix it with the right column order, index an expression, and find a redundant index in sqlite_master.
+prereqs: "You should have read <a href='/sql/where-clause/the-equals-operator/'>The equals operator</a> and <a href='/sql/where-clause/functions/'>Functions</a>, and know that SQLite writes <code>SEARCH</code> for an index access and <code>SCAN</code> for a full table scan."
+outcomes:
+  - Read a primary key lookup off a SQLite plan and see which key columns it resolved
+  - Watch a condition on a trailing index column fall back to a full scan, and fix it by column order
+  - Confirm that one concatenated index serves both a two-column and a one-column query
+  - Turn UPPER(last_name) = ? from a scan into a lookup with an expression index
+  - Recognise a redundant index in the catalog and drop it without losing a plan
+recap:
+  - A lookup by the full primary key is a SEARCH that lists every key column. A prefix of the key still works; a trailing column alone does not.
+  - The order of columns in the where clause changes nothing. The order of columns in the index decides everything.
+  - An index on (subsidiary_id, last_name) answers both subsidiary_id = ? and subsidiary_id = ? AND last_name = ?. An index on (subsidiary_id) next to it is pure write cost.
+  - A condition on UPPER(last_name) needs an index on UPPER(last_name). The query has to spell the expression the same way.
+---
+import { Callout, Check, TryIt } from '@/components/mdx';
+
+Every exercise below runs in a fresh copy of the example database. The `employees` table has its primary key on `(employee_id, subsidiary_id)`, and SQLite names the index that enforces it `sqlite_autoindex_employees_1`. Run each query, read the plan under the result, change what the task asks for and run again. A task ticks itself when the statement you ran and the plan it produced match what the task expects.
+
+## 1. Look up one employee by primary key
+
+Employee 123 works in subsidiary 30. Fetch the row by its full key. The result is one row, Elena Novak, and the plan is a `SEARCH` on the primary key index that lists both columns as resolved conditions. Then take the second condition away and see what the index can still do with half a key. Finally, write the two conditions the other way round and compare the plans.
+
+<TryIt id="p2.1" tasks={[
+  { text: 'Run the query as given. The plan names <code>sqlite_autoindex_employees_1</code> and lists <code>employee_id=? AND subsidiary_id=?</code> after it: both columns steered the tree traversal.', sql: 'employee_id\\s*=\\s*123', plan: 'SEARCH employees USING INDEX sqlite_autoindex_employees_1 \\(employee_id=\\? AND subsidiary_id=\\?\\)' },
+  { text: 'Remove the <code>subsidiary_id</code> condition and run again. Same row, still a <code>SEARCH</code>, but the plan now lists only <code>employee_id=?</code>. Why does a half key still work?', sql: 'employee_id\\s*=\\s*123', plan: 'sqlite_autoindex_employees_1 \\(employee_id=\\?\\)' },
+  { text: 'Put <code>subsidiary_id = 30</code> first in the where clause and <code>employee_id = 123</code> second. The plan does not change at all.', sql: 'subsidiary_id\\s*=\\s*30\\s+and\\s+employee_id\\s*=\\s*123', plan: '\\(employee_id=\\? AND subsidiary_id=\\?\\)' },
+]} sql={`SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE employee_id = 123
+   AND subsidiary_id = 30;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 2</summary><div class="d">The index is sorted by <code>employee_id</code> first. All entries for employee 123 sit together, whatever their subsidiary, so the traversal can still find them. <code>subsidiary_id</code> on its own would not have that property.</div></details>
+    <details class="hint"><summary>Hint for task 3</summary><div class="d">The optimizer matches conditions to index columns by name, not by position in the text. Swapping them in the where clause is purely cosmetic.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>-- task 1
+SELECT first&#95;name, last&#95;name, phone&#95;number FROM employees
+ WHERE employee&#95;id = 123 AND subsidiary&#95;id = 30;
+-- SEARCH employees USING INDEX sqlite&#95;autoindex&#95;employees&#95;1 (employee&#95;id=? AND subsidiary&#95;id=?)
+-- task 2
+SELECT first&#95;name, last&#95;name, phone&#95;number FROM employees
+ WHERE employee&#95;id = 123;
+-- SEARCH employees USING INDEX sqlite&#95;autoindex&#95;employees&#95;1 (employee&#95;id=?)
+-- task 3
+SELECT first&#95;name, last&#95;name, phone&#95;number FROM employees
+ WHERE subsidiary&#95;id = 30 AND employee&#95;id = 123;
+-- SEARCH employees USING INDEX sqlite&#95;autoindex&#95;employees&#95;1 (employee&#95;id=? AND subsidiary&#95;id=?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+## 2. The column that is in the key but not at the front
+
+Now list everyone in subsidiary 30. The column is part of the primary key, the query returns 200 rows, and the plan is `SCAN employees`: the key index is sorted by `employee_id`, so the entries for one subsidiary are scattered through it and the optimizer reads the table instead.
+
+In a real schema the fix is to define the key as `(subsidiary_id, employee_id)`. SQLite cannot reorder a primary key in place, so stand in for that with a second index in the same order, then run the query again.
+
+<TryIt id="p2.2" tasks={[
+  { text: 'Run the query. 200 rows, and the plan says <code>SCAN employees</code> although <code>subsidiary_id</code> is part of the primary key.', sql: 'subsidiary_id\\s*=\\s*30', plan: '^SCAN employees' },
+  { text: 'Create an index named <code>emp_sub_id</code> on <code>(subsidiary_id, employee_id)</code>: the same two columns as the key, in the order the query needs.', sql: 'create\\s+index\\s+emp_sub_id\\s+on\\s+employees\\s*\\(\\s*subsidiary_id\\s*,\\s*employee_id\\s*\\)' },
+  { text: 'Run the subsidiary query again. The plan becomes <code>SEARCH employees USING INDEX emp_sub_id (subsidiary_id=?)</code>, and the 200 rows now come from one contiguous stretch of the index.', sql: 'subsidiary_id\\s*=\\s*30', plan: 'SEARCH employees USING INDEX emp_sub_id \\(subsidiary_id=\\?\\)' },
+]} sql={`SELECT first_name, last_name
+  FROM employees
+ WHERE subsidiary_id = 30;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 2</summary><div class="d">Type the <code>CREATE INDEX</code> statement into the same box and run it. The playground keeps the index for the rest of the exercise. The statement produces no plan; the tick comes from the statement text.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>-- task 1: SCAN employees
+-- task 2
+CREATE INDEX emp&#95;sub&#95;id ON employees (subsidiary&#95;id, employee&#95;id);
+-- task 3
+SELECT first&#95;name, last&#95;name FROM employees WHERE subsidiary&#95;id = 30;
+-- SEARCH employees USING INDEX emp&#95;sub&#95;id (subsidiary&#95;id=?)
+-- the full-key lookup from exercise 1 still uses the primary key:
+SELECT first&#95;name, last&#95;name FROM employees
+ WHERE employee&#95;id = 123 AND subsidiary&#95;id = 30;
+-- SEARCH employees USING INDEX sqlite&#95;autoindex&#95;employees&#95;1 (employee&#95;id=? AND subsidiary&#95;id=?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+## 3. One index, two queries
+
+This exercise starts with an index on `(subsidiary_id, last_name)` already in place. Subsidiary 30 has 34 employees called Novak, and the query finds them through both index columns. Then drop the name condition and check that the same index still serves the subsidiary on its own. Then search by name alone, across all subsidiaries, and see why that query gets nothing from this index: 67 Novaks, found by reading the whole table.
+
+<TryIt id="p2.3" setup={`CREATE INDEX emp_sub_name ON employees (subsidiary_id, last_name);`} tasks={[
+  { text: 'Run the query. 34 rows, and the plan reads <code>SEARCH employees USING INDEX emp_sub_name (subsidiary_id=? AND last_name=?)</code>: both conditions are access predicates.', sql: "last_name\\s*=\\s*'Novak'", plan: 'emp_sub_name \\(subsidiary_id=\\? AND last_name=\\?\\)' },
+  { text: 'Remove the <code>last_name</code> condition. 200 rows, and the same index serves the query with <code>(subsidiary_id=?)</code> alone.', sql: 'subsidiary_id\\s*=\\s*30', plan: 'emp_sub_name \\(subsidiary_id=\\?\\)' },
+  { text: 'Now search for <code>last_name = \'Novak\'</code> without a subsidiary. 67 rows and <code>SCAN employees</code>: the index holds the name, but not at the front.', sql: "last_name\\s*=\\s*'Novak'", plan: '^SCAN employees' },
+]} sql={`SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 30
+   AND last_name = 'Novak';`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 3</summary><div class="d">Within the index, the Novaks of subsidiary 10 sit in the block for subsidiary 10, those of subsidiary 20 in the block for 20, and so on. There is no single place to start, so the tree is of no use.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>-- task 1: 34 rows
+SELECT first&#95;name, last&#95;name, phone&#95;number FROM employees
+ WHERE subsidiary&#95;id = 30 AND last&#95;name = 'Novak';
+-- SEARCH employees USING INDEX emp&#95;sub&#95;name (subsidiary&#95;id=? AND last&#95;name=?)
+-- task 2: 200 rows
+SELECT first&#95;name, last&#95;name, phone&#95;number FROM employees
+ WHERE subsidiary&#95;id = 30;
+-- SEARCH employees USING INDEX emp&#95;sub&#95;name (subsidiary&#95;id=?)
+-- task 3: 67 rows
+SELECT first&#95;name, last&#95;name, phone&#95;number FROM employees
+ WHERE last&#95;name = 'Novak';
+-- SCAN employees</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Callout kind="tip" title="Which query gets the leading column">When two queries share a column, the one that uses that column alone decides the order. Here the subsidiary listing needs <code>subsidiary_id</code> first; the name search needs <code>last_name</code> first. One index cannot lead with both. If both queries matter, the question becomes which one runs often enough to earn a second index.</Callout>
+
+## 4. Index the expression, not the column
+
+An index on `last_name` already exists in this exercise. The query looks for Winand case-insensitively, which is the form a search box produces, and the plan is `SCAN employees`: the index holds `Winand`, the condition asks about `WINAND`, and the optimizer does not know that the two are related. Create an index on the expression and run the query again. The result is 66 rows either way.
+
+<TryIt id="p2.4" setup={`CREATE INDEX emp_name ON employees (last_name);`} tasks={[
+  { text: 'Run the query. 66 rows and <code>SCAN employees</code>, despite the index on <code>last_name</code>.', sql: 'upper\\s*\\(\\s*last_name\\s*\\)', plan: '^SCAN employees' },
+  { text: 'Create an index named <code>emp_up_name</code> on <code>UPPER(last_name)</code>.', sql: 'create\\s+index\\s+emp_up_name\\s+on\\s+employees\\s*\\(\\s*upper\\s*\\(\\s*last_name\\s*\\)\\s*\\)' },
+  { text: 'Run the query again. The plan is <code>SEARCH employees USING INDEX emp_up_name (&lt;expr&gt;=?)</code>; SQLite writes <code>&lt;expr&gt;</code> for an indexed expression.', sql: 'upper\\s*\\(\\s*last_name\\s*\\)', plan: 'SEARCH employees USING INDEX emp_up_name \\(<expr>=\\?\\)' },
+]} sql={`SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE UPPER(last_name) = UPPER('winand');`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 2</summary><div class="d">The syntax is the same as for a column, with the expression in place of the column name: <code>CREATE INDEX name ON table (expression)</code>.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>-- task 1: SCAN employees
+-- task 2
+CREATE INDEX emp&#95;up&#95;name ON employees (UPPER(last&#95;name));
+-- task 3
+SELECT first&#95;name, last&#95;name, phone&#95;number FROM employees
+ WHERE UPPER(last&#95;name) = UPPER('winand');
+-- SEARCH employees USING INDEX emp&#95;up&#95;name (&lt;expr&gt;=?)
+-- for comparison: a different spelling of the expression is a different index
+SELECT first&#95;name, last&#95;name, phone&#95;number FROM employees
+ WHERE LOWER(last&#95;name) = 'winand';
+-- SCAN employees</pre></div></details>
+  </Fragment>
+</TryIt>
+
+Once `emp_up_name` exists, try `LOWER(last_name) = 'winand'` in the same box. Same 66 rows, back to `SCAN`. The expression in the query has to match the expression in the index, and `UPPER` and `LOWER` are two different expressions.
+
+## 5. The index that only costs
+
+The last exercise starts with two indexes on `employees`: `emp_sub_name` on `(subsidiary_id, last_name)` and `emp_sub` on `(subsidiary_id)`. The second one answers nothing the first cannot, because `subsidiary_id` leads both. It still has to be updated on every insert and delete, and it takes its own space on disk and in the cache.
+
+The first query lists what is in the catalog. `sqlite_master` is SQLite's data dictionary; the `sql` column holds the statement that created each index, and `NULL` for the index SQLite created for the primary key. Then watch which index the optimizer picks for a subsidiary query, drop the redundant one, and confirm that the query still has an index to use.
+
+<TryIt id="p2.5" setup={`CREATE INDEX emp_sub_name ON employees (subsidiary_id, last_name);
+CREATE INDEX emp_sub ON employees (subsidiary_id);
+ANALYZE;`} tasks={[
+  { text: 'Run the catalog query. Three indexes on <code>employees</code>: the primary key index and the two named ones. Decide which named index the other one makes redundant.', sql: 'sqlite_master' },
+  { text: 'Run <code>SELECT first_name, last_name FROM employees WHERE subsidiary_id = 30;</code>. The optimizer picks <code>emp_sub</code>, the narrower index, for the 200 rows.', sql: 'subsidiary_id\\s*=\\s*30', plan: 'USING INDEX emp_sub \\(subsidiary_id=\\?\\)' },
+  { text: 'Drop <code>emp_sub</code> and run the subsidiary query again. Same 200 rows, now through <code>emp_sub_name (subsidiary_id=?)</code>. Nothing was lost.', sql: 'subsidiary_id\\s*=\\s*30', plan: 'USING INDEX emp_sub_name \\(subsidiary_id=\\?\\)' },
+]} sql={`SELECT name, sql
+  FROM sqlite_master
+ WHERE type = 'index'
+   AND tbl_name = 'employees';`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 2</summary><div class="d">With both indexes present, the optimizer prefers the one with fewer bytes per entry, because a narrower index packs more entries into each leaf node. That is a small saving on reads and no argument for keeping an index that has to be maintained on every write.</div></details>
+    <details class="hint"><summary>Hint for task 3</summary><div class="d"><code>DROP INDEX emp_sub;</code> then run the <code>SELECT</code> again. Run the catalog query once more if you want to see that only two indexes remain.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>-- task 1
+SELECT name, sql FROM sqlite&#95;master WHERE type = 'index' AND tbl&#95;name = 'employees';
+-- sqlite&#95;autoindex&#95;employees&#95;1  NULL
+-- emp&#95;sub&#95;name                  CREATE INDEX emp&#95;sub&#95;name ON employees (subsidiary&#95;id, last&#95;name)
+-- emp&#95;sub                       CREATE INDEX emp&#95;sub ON employees (subsidiary&#95;id)
+-- task 2
+SELECT first&#95;name, last&#95;name FROM employees WHERE subsidiary&#95;id = 30;
+-- SEARCH employees USING INDEX emp&#95;sub (subsidiary&#95;id=?)
+-- task 3
+DROP INDEX emp&#95;sub;
+SELECT first&#95;name, last&#95;name FROM employees WHERE subsidiary&#95;id = 30;
+-- SEARCH employees USING INDEX emp&#95;sub&#95;name (subsidiary&#95;id=?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="employees has an index on (subsidiary_id, last_name) and another on (subsidiary_id). Which queries lose index access when the second one is dropped?"
+  options={[
+    'None. Every query on subsidiary_id is served by the leading column of the two-column index.',
+    'Queries on subsidiary_id alone. The two-column index only serves queries that use both columns.',
+    'Queries on last_name alone. They were using the single-column index indirectly.',
+  ]}
+  answer={0}
+  explain="An index is usable for any prefix of its columns, so (subsidiary_id, last_name) serves subsidiary_id = ? as well as subsidiary_id = ? AND last_name = ?. That is exercise 3, and exercise 5 shows the plan switching from emp_sub to emp_sub_name without a scan. Queries on last_name alone never used either index, because last_name leads neither; they were a SCAN before and remain one."
+/>

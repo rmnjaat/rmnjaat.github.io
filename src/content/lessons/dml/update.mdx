@@ -1,0 +1,113 @@
+---
+title: Update
+subtitle: An update is a delete plus an insert for every index whose columns change. Change one unindexed column and no index moves. Let an ORM write every column and they all might.
+chapter: dml
+order: 3
+kind: lesson
+minutes: 8
+summary: Why an UPDATE relocates index entries and costs about a delete plus an insert per affected index, why only indexes that contain a changed column are affected, what the measured curves for an all-columns and a one-column update look like, and how ORM tools such as Hibernate can defeat the saving by setting every column.
+prereqs: "You should have read <a href='/sql/dml/insert/'>Insert</a> and <a href='/sql/dml/delete/'>Delete</a>, because an update does both."
+outcomes:
+  - Why a changed index entry has to be removed and re-inserted
+  - Which indexes an UPDATE touches, and which it leaves alone
+  - How the measured curves differ between an all-columns and a one-column update
+  - How ORM tools generate updates, and the Hibernate setting that controls it
+  - Why occasional SQL logging in development is worth the effort
+recap:
+  - When an indexed value changes, its entry is in the wrong place. The database removes the old entry and inserts the new one, so the cost is about a delete plus an insert in that index.
+  - Only indexes that contain an updated column are affected. The number of indexes still matters, but the SET clause decides how many of them move.
+  - Measured from one to five indexes, an update of all columns grows like an insert; an update of one column barely grows.
+  - Update only the columns that changed. Hibernate generates all-columns updates when dynamic-update is off; check what your ORM sends by logging its SQL.
+source: https://use-the-index-luke.com/sql/dml/update
+---
+import { Callout, KeyIdea, Figure, Check, TryIt } from '@/components/mdx';
+
+An update changes values in rows that already exist. For the table that is a rewrite in place. For an index it is more involved, because an index entry has a position that depends on its value, and when the value changes the entry is suddenly in the wrong place. This lesson is about which entries have to move, and about a common way of making far more of them move than necessary.
+
+## 1. An update is a delete plus an insert
+
+To keep an index in order, the database has to relocate every entry whose value changed. It removes the old entry from its leaf and inserts the new one where the new value belongs: a tree traversal and a leaf write for each half. The response time of an update is therefore roughly that of the corresponding delete and insert together, per affected index.
+
+Like the other two DML statements, an update gets slower with every index on the table. The difference is that an update does not necessarily touch every column. Most updates change a few selected columns, and an index whose columns did not change still holds a correct entry. So an update only affects the indexes that contain at least one updated column.
+
+```sql
+UPDATE sales
+   SET quantity = 3
+ WHERE product_id = 17
+   AND sale_date >= '2025-01-01';
+```
+
+The where clause is planned like a select's, and an index on `(product_id, sale_date)` finds the rows with one range scan. Only `quantity` changes. Neither the primary key nor that index contains `quantity`, so no index entry moves. The cost is finding the rows and rewriting them in the table.
+
+<KeyIdea>An index is affected by an update only if it contains a column in the `SET` clause. The number of indexes sets the upper bound; the `SET` clause decides how many of them actually move.</KeyIdea>
+
+## 2. All columns versus one column
+
+The original measurement ran two updates against the same table with one to five indexes: one that sets every column and therefore affects every index, and one that changes a single column and affects a single index.
+
+<Figure n="8.4" title="Update performance by index count and column count">
+
+| Indexes | All columns | One column |
+| --- | --- | --- |
+| 1 | about 0.04 s | about 0.04 s |
+| 2 | about 0.08 s | about 0.05 s |
+| 3 | about 0.12 s | about 0.05 s |
+| 4 | about 0.16 s | about 0.06 s |
+| 5 | about 0.20 s | about 0.06 s |
+
+<p slot="caption">Read off the original chart, whose axis runs from 0 to 0.20 seconds. The all-columns update grows with every index, as insert and delete did. The one-column update barely grows, because it leaves most indexes untouched.</p>
+</Figure>
+
+The all-columns line repeats the pattern of the two [previous](/sql/dml/insert/) lessons: each additional index adds its share. The one-column line stays nearly flat, which is the saving an update offers that an insert and a delete cannot.
+
+## 3. Update only what changed
+
+The rule that follows is easy to state: set only the columns whose values actually changed. When you write the SQL by hand that is natural. ORM tools are a different matter. Many of them load an object, let the program change one field, and then issue an `UPDATE` that lists every mapped column, whether it changed or not.
+
+```sql
+UPDATE sales
+   SET employee_id = 594, subsidiary_id = 20, sale_date = '2025-04-24',
+       eur_value = 785.6, product_id = 192, quantity = 3
+ WHERE sale_id = 17647;
+```
+
+Only `quantity` differs from what is stored, but the statement does not say so, and in the worst case every index on the table is maintained for a one-column change. Hibernate generates exactly this statement when its *dynamic-update* mode is off. The original says the mode became the default in Hibernate 4.0; the current Hibernate documentation still lists `@DynamicUpdate` as off by default, so check the mapping rather than the version. Whatever your ORM, the setting is per mapping and worth a look.
+
+<Callout kind="tip" title="Log the SQL">When you work with an ORM, switch on query logging in a development environment now and then and read what it actually sends. The [SQL logging tip](/sql/join/nested-loops-join-n1-problem/) in the join unit shows how to enable it in several common ORM tools.</Callout>
+
+<Callout kind="warning" title="Common mistake">Assuming that an ORM's "save" writes only the dirty fields. Some do, some do not, and some do only when asked. One look at the generated `UPDATE` settles it.</Callout>
+
+<KeyIdea title="Think about it">An update can leave most indexes alone. Is there any way an `INSERT` or a `DELETE` could skip an index too, the way an update skips the ones whose columns it leaves alone? The [partial and filtered indexes](/sql/where-clause/partial-and-filtered-indexes/) from Unit 2 are a good place to start.</KeyIdea>
+
+## 4. Try it yourself
+
+The playground has `sales_prod` on `(product_id, sale_date)`. The plan is shown for `SELECT` statements, so the first task runs the select half of the update to see how the rows are found.
+
+<TryIt id="8.3" setup={`CREATE INDEX sales_prod ON sales (product_id, sale_date);`} tasks={[
+  { text: 'Run the count as given. The plan is <code>SEARCH sales USING COVERING INDEX sales_prod (product_id=? AND sale_date&gt;?)</code>, the access path the update will use. Covering, because a count needs no table column; the update will read the table as well.', sql: 'count\\s*\\(\\s*\\*\\s*\\)[\\s\\S]*product_id\\s*=\\s*17', plan: 'SEARCH sales USING (COVERING )?INDEX sales_prod \\(product_id=\\? AND sale_date>\\?\\)' },
+  { text: "Run <code>UPDATE sales SET quantity = 3 WHERE product_id = 17 AND sale_date &gt;= '2025-01-01'</code>. <code>quantity</code> is in no index, so nothing moves in <code>sales_prod</code>.", sql: 'update\\s+sales\\s+set\\s+quantity\\s*=' },
+  { text: "Change the SET clause to <code>sale_date = '2025-12-31'</code> and run it again. Now every affected entry has to be removed from and re-inserted into <code>sales_prod</code>. Compare the times.", sql: "update\\s+sales\\s+set\\s+sale_date\\s*=\\s*'2025-12-31'" },
+]} sql={`SELECT count(*)
+  FROM sales
+ WHERE product_id = 17
+   AND sale_date >= '2025-01-01';`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 3</summary><div class="d">The second update changes an indexed column, so each row's entry in sales_prod moves to a new position. With a few dozen rows the difference is small in absolute terms; it is the mechanism that matters.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>UPDATE sales SET quantity = 3
+ WHERE product&#95;id = 17 AND sale&#95;date &gt;= '2025-01-01';
+UPDATE sales SET sale&#95;date = '2025-12-31'
+ WHERE product&#95;id = 17 AND sale&#95;date &gt;= '2025-01-01';</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="A table has indexes on sale_date and on (product_id, sale_date). UPDATE sales SET eur_value = eur_value * 1.1 WHERE sale_id = 4711 runs. Which indexes are modified?"
+  options={[
+    'Both. Every index must be updated whenever a row changes.',
+    'None. eur_value is in neither index, so only the row in the table is rewritten.',
+    'Only the primary key, because the where clause used it.',
+  ]}
+  answer={1}
+  explain="An index entry only has to move when one of its own columns changes. eur_value is not in either index, so both entries for that row are still correct where they are. The primary key was used to find the row, which is a read of that index, not a write."
+/>

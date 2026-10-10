@@ -1,0 +1,86 @@
+---
+title: Gupta SQLBase
+subtitle: SET PLANONLY and the SQLTalk plan window, what the one-line-per-table plan does and does not show, and the session settings that change how the optimizer treats limits and bind variables.
+section: explain-plan
+order: 7
+summary: Reading Gupta (Unify) SQLBase execution plans for indexing work. SET PLANONLY ON, SYSADM.PLAN_TABLE, the Session menu plan window, the INDEX column, index leaf scans and matching index scans, loop, merge and hash joins, SET LIMIT and SET OPTIMIZEFIRSTFETCH, and why bind variables need special care.
+source: https://use-the-index-luke.com/sql/explain-plan/sqlbase/getting-an-execution-plan
+---
+import { Callout } from '@/components/mdx';
+
+SQLBase is a small commercial database from Gupta Technologies (later Unify, now part of OpenText) that is still found in older Windows applications. Its plans are far less detailed than those of the other engines in this appendix, so this page is shorter, and it is honest about what the plan cannot tell you. The original scripts were tested on SQLBase 11.7.
+
+## Getting an execution plan
+
+The most informative route is a session setting. After `SET PLANONLY ON`, every statement you send is planned but not executed, and what comes back is the plan instead of the result.
+
+```sql
+SET PLANONLY ON;
+
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name = 'Winand';
+
+SET PLANONLY OFF;
+```
+
+The same plan is also written to the table `SYSADM.PLAN_TABLE`, where it can be queried with ordinary SQL. Switch plan-only mode off first: while it is on, a `SELECT` against `PLAN_TABLE` is itself only planned, and you get the plan of that query instead of the rows you wanted.
+
+The interactive client, SQLTalk, offers a second route. Run the statement, then open **Session → Execution Plan** or press the tree icon in the toolbar. A separate window shows the plan of the statement that just ran. Its layout differs from the plan-only output and carries less detail, so the setting is the better tool for the work on this page.
+
+<Callout kind="warning" title="Bind variables are planned blind">SQLBase keeps a cache of execution plans, but it does not look at the values of bind variables when it builds a plan, so a statement with `subsidiary_id = ?` is planned without knowing whether the value will match half the table or a fifth of it. The vendor's Advanced Topics Guide describes a session setting that converts bind variables into constants before planning. Use it when the [distribution matters](/sql/where-clause/bind-parameters/), and keep the usual caveat in mind: literal values defeat plan reuse.</Callout>
+
+## Operations
+
+A SQLBase plan has one line per table access, listed from top to bottom in the order the tables are visited. The `INDEX` column names the index used for that access, or is empty for a full scan. That is nearly all the plan says: it does not distinguish a unique lookup from a range scan, and it does not say whether the table was visited after the index or the index alone answered the query.
+
+What actually happens behind the `INDEX` column is one of these physical operations, named here after the Oracle operations they correspond to.
+
+| Physical operation | What it means |
+| --- | --- |
+| Index leaf scan | Reads the index in key order from one end to the other, like Oracle's `INDEX FULL SCAN`, and fetches rows from the table as needed. Useful for an `ORDER BY`, expensive as a search. |
+| Matching index scan | Tree traversal to the first matching entry, then a walk along the matching entries, with a table access for each. The equivalent of `INDEX RANGE SCAN` or `INDEX UNIQUE SCAN` plus `TABLE ACCESS BY INDEX ROWID`. |
+| Index-only access | A matching index scan that never touches the table because every column the statement needs is in the index. The plan does not mark it. |
+
+Joins are processed two tables at a time; a statement with several joins runs them one after the other, and the "table" on one side of a later join is the intermediate result of an earlier one. Whether those intermediate results are always materialized is not documented; temporary tables on disk are mentioned in the vendor's material.
+
+| Join | What it means |
+| --- | --- |
+| Simple loop join | Nested loops without any index: for each row of the outer table, the inner table is scanned in full. The one to avoid. |
+| Loop join with index | Nested loops where the inner table is reached through an index. For an equality join the optimizer may build a temporary hash index for the duration of the statement. |
+| `MERGE JOIN` | A sort-merge join. SQLBase only chooses it when both join columns are indexed, so that neither side needs a sort. |
+| `HASH JOIN` | A hash join: one side is loaded into a hash table, the other probes it. No index on the join columns is involved. |
+
+Sorting and grouping do not appear in the plan at all. There is no line for a sort and none for an aggregate. The only way to tell whether an `ORDER BY` was sorted or delivered from an index is to look at the `INDEX` column of the table access and compare with the index definition. `CREATE INDEX` accepts `ASC` and `DESC` per column, so an index can be built to match a mixed-direction `ORDER BY` as described in the [sorting lesson](/sql/sorting-grouping/order-by-asc-desc-nulls-last/).
+
+Top-N queries are controlled by session settings rather than by SQL syntax.
+
+```sql
+SET LIMIT 10;
+SELECT sale_date, eur_value
+  FROM sales
+ ORDER BY sale_date DESC;
+SET LIMIT OFF;
+```
+
+`SET LIMIT` stops the result after the given number of rows, but it does not appear to change the plan: the optimizer still prepares to deliver everything. `SET OPTIMIZEFIRSTFETCH 1` is the setting that does: it tells the optimizer to prefer the plan that returns the first row fastest, which is what makes an index-ordered, pipelined [top-N query](/sql/partial-results/top-n-queries/) possible. Set it back to `0` afterwards, because the same preference is wrong for statements that read the whole result. The plan shows neither the limit nor the absence of a sort, so the effect has to be measured.
+
+## Access predicates and filter predicates
+
+The original appendix has no page on this topic for SQLBase, because the plan offers nothing to read: there is no predicate section, no key length, and no distinction between conditions that bound the index scan and conditions that are checked on every entry. The split still exists in the engine, since a B-tree can only be entered through its leading columns, and you have to reconstruct it from the index definition.
+
+Apply the same rule as everywhere else. Take the index named in the `INDEX` column and walk its columns from the left. Every column that has an equality condition in the where clause is an access predicate; the first column with a range condition (`<`, `>`, `BETWEEN`, `LIKE 'abc%'`) is the last access predicate; everything after that, and every column the where clause skips, is a filter that the engine evaluates on each entry in the range. The [range lesson](/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates/) explains why the order matters and the [myth about selectivity](/sql/myth-directory/most-selective-first/) explains why it is not fixed by column statistics.
+
+<Callout kind="important" title="Verify by timing, not by reading">Because the plan cannot confirm your reconstruction, test it. Run the statement with the condition you believe to be the access predicate alone, then with the full where clause, and compare response times as the table grows. If the full query is not much faster than the partial one, the extra condition is a filter.</Callout>
+
+## Reading the numbers
+
+There are none to read. The plan output lists operations and index names, not cost estimates, row counts or timings, so the comparisons of estimated against actual rows that the other pages of this appendix rely on are not available. What you can do is make sure the optimizer works from current statistics and then measure.
+
+```sql
+UPDATE STATISTICS ON TABLE employees;
+UPDATE STATISTICS ON INDEX employees_pk;
+```
+
+Run both after loading data or creating an index; without statistics the choice between a loop join with index and a simple loop join is a guess. Then time the statement in SQLTalk with a realistic data volume. The scaling behaviour described in [unit 3](/sql/testing-scalability/) applies unchanged: a query whose time grows with the table size is reading a filtered range or scanning, whatever the `INDEX` column says.

@@ -1,0 +1,77 @@
+---
+title: "Unit check: Insert, Delete and Update"
+subtitle: Five questions on what indexes cost on the write side.
+chapter: dml
+order: 5
+kind: quiz
+minutes: 5
+summary: Five multiple-choice questions covering index redundancy, the cost of a leaf split, which statements can use an index for their where clause, TRUNCATE and MVCC side effects, and which indexes an update has to maintain.
+recap:
+  - An index is a redundant copy that every write has to keep consistent.
+  - INSERT cannot use an index; DELETE and UPDATE use one for their where clause.
+  - The first index makes the biggest difference to insert time.
+  - An update touches only the indexes whose columns change.
+---
+import { Check } from '@/components/mdx';
+
+Five questions on this unit. Each has one best answer, and the explanation after your pick says why.
+
+<Check
+  client:visible
+  question="Why do indexes slow down INSERT, DELETE and UPDATE?"
+  options={[
+    'Because the database has to re-sort the whole index after every change.',
+    'Because an index is a redundant copy of table data, and every write has to keep each copy consistent.',
+    'Because indexes lock the table for the duration of the statement.',
+  ]}
+  answer={1}
+  explain="An index contains only data that is also in the table. Whenever that data changes, every index holding a copy has to be changed as well, inside the same statement. No re-sort is needed; the B-tree absorbs each change locally, but it is still one tree operation per index per row."
+/>
+
+<Check
+  client:visible
+  question="Which statement is the only one that cannot benefit from an index directly?"
+  options={[
+    'INSERT, because it has no where clause.',
+    'DELETE, because it removes rows instead of reading them.',
+    'UPDATE, because it changes the indexed values.',
+  ]}
+  answer={0}
+  explain="DELETE and UPDATE both have a where clause that is planned like a SELECT's, so an index can make finding the rows faster. An INSERT has nothing to find; every index is pure maintenance cost for it."
+/>
+
+<Check
+  client:visible
+  question="What is the only event that makes a B-tree deeper?"
+  options={[
+    'Any leaf node split.',
+    'A split that propagates all the way up and splits the root node.',
+    'Creating a second index on the same table.',
+  ]}
+  answer={1}
+  explain="A leaf split adds a reference to the branch node above. If that node is full it splits too, and so on upwards. Only when the root itself splits does the tree gain a layer. Every other split keeps the depth unchanged."
+/>
+
+<Check
+  client:visible
+  question="Which statement about TRUNCATE TABLE is true?"
+  options={[
+    'It uses the primary key index to find the rows quickly.',
+    'It removes all rows in one step, commits implicitly in most engines (not PostgreSQL and SQL Server), and fires no triggers.',
+    'It is just a faster spelling of DELETE with no side effects.',
+  ]}
+  answer={1}
+  explain="TRUNCATE does not look for rows at all; it discards the table contents wholesale. That makes it very fast, but it is not a plain delete: most engines commit implicitly, PostgreSQL and SQL Server being the exceptions, and no row triggers run."
+/>
+
+<Check
+  client:visible
+  question="An ORM loads a sales row, the program changes quantity, and the ORM issues UPDATE sales SET employee_id = 594, subsidiary_id = 20, sale_date = '2025-04-24', eur_value = 785.6, product_id = 192, quantity = 3 WHERE sale_id = 17647. The table has indexes on sale_date and on (product_id, sale_date). What does the lesson say about it?"
+  options={[
+    'It is harmless: the database compares old and new values and skips the indexes whose values did not change.',
+    'It is the all-columns update from the measurement. Whether an index moves depends on the engine, and in the worst case every index is maintained for a one-column change, so make the ORM send only the dirty columns.',
+    'It is faster than SET quantity = 3, because the database can skip reading the row first.',
+  ]}
+  answer={1}
+  explain="The statement does not say which value changed, so the saving of a one-column update is lost unless the engine detects unchanged values itself. Hibernate behaves this way with dynamic-update off, which is still its documented default, and the only reliable check is to log the SQL the ORM sends. See Update, section 3."
+/>

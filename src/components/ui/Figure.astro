@@ -1,0 +1,9 @@
+---
+interface Props { n?: string; title: string }
+const { n, title } = Astro.props;
+---
+<figure class="fig">
+  <div class="fig-head">{n && <span class="fig-n">Figure {n}</span>}<span class="fig-title">{title}</span></div>
+  <div class="fig-body"><slot /></div>
+  <figcaption><slot name="caption" /></figcaption>
+</figure>

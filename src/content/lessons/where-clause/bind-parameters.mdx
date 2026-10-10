@@ -1,0 +1,313 @@
+---
+title: Bind Parameters
+subtitle: Placeholders keep SQL safe and let the database reuse execution plans. They also hide the value from the optimizer, which sometimes matters.
+chapter: where-clause
+order: 3
+kind: lesson
+minutes: 12
+summary: What bind parameters do for security and plan caching, why the optimizer cannot use a column histogram for a bound value, the few cases where a literal is the better choice, how to bind in C#, Java, Perl, PHP and Ruby, and what placeholders cannot do.
+prereqs: "You should have read <a href='/sql/where-clause/the-equals-operator/slow-indexes-part-ii/'>Slow Indexes, Part II</a> and know that the optimizer chooses a plan by estimated cost."
+outcomes:
+  - What a bind parameter is and the two reasons programs should use them
+  - Why the same query gets two different plans for two subsidiaries, and one plan with a placeholder
+  - How to decide when a value should be a literal instead
+  - How to bind a value in five common languages
+  - What placeholders cannot replace, and what CURSOR_SHARING and forced parameterization do
+recap:
+  - Bind parameters separate the SQL text from the values. That stops injection and lets one cached plan serve every execution.
+  - With a literal the optimizer reads the histogram and may pick a different plan per value. With a placeholder it assumes an even distribution and builds one plan for all.
+  - "Use bind parameters by default. Use a literal only for a value that should change the plan: skewed status codes, partition keys, some LIKE patterns."
+  - The question mark is the standard, positional placeholder; named parameters are a vendor extension. Neither can stand in for a table or column name.
+  - CURSOR_SHARING and forced parameterization replace literals automatically. They are a workaround for applications that never bind, and they take the choice away from you.
+source: https://use-the-index-luke.com/sql/where-clause/bind-parameters
+---
+import { Callout, KeyIdea, EngineTabs, Check, TryIt } from '@/components/mdx';
+
+Most SQL textbooks skip this topic, and most slow applications pay for it. There are two ways to get a value into a where clause. Write it into the SQL text, or leave a placeholder in the text and hand the value over separately. The placeholder is a **bind parameter**, also called a bind variable or dynamic parameter.
+
+## 1. Two ways to pass a value
+
+A bind parameter is a marker such as `?`, `:name` or `@name` that stands where a value would be. The actual value travels through a separate API call when the statement is executed. There is nothing wrong with writing values into an ad-hoc statement you type by hand. In a program there are two good reasons not to.
+
+**Security.** A value that arrives as a parameter is never parsed as SQL, so it cannot smuggle in a second statement. Bind variables are the most reliable defence against [SQL injection](https://en.wikipedia.org/wiki/SQL_injection).
+
+**Performance.** Databases with an execution plan cache, SQL Server and Oracle among them, can reuse a plan when the same statement runs again. That saves the work of building the plan, but it only works when the SQL text is exactly the same. A statement with a different value in it is a different statement and gets optimised from scratch. With placeholders the text never changes, however many values run through it.
+
+```sql
+SELECT first_name, last_name
+  FROM employees
+ WHERE subsidiary_id = ?
+```
+
+## 2. When the value changes the plan
+
+The exceptions are the cases where the amount of data depends on the value. Two subsidiaries, two very different plans:
+
+```sql
+SELECT first_name, last_name
+  FROM employees
+ WHERE subsidiary_id = 30
+```
+
+```
+99 rows selected.
+
+----------------------------------------------------------------
+|Id | Operation                   | Name         | Rows | Cost |
+----------------------------------------------------------------
+| 0 | SELECT STATEMENT            |              |   99 |   70 |
+| 1 |  TABLE ACCESS BY INDEX ROWID| EMPLOYEES    |   99 |   70 |
+|*2 |   INDEX RANGE SCAN          | EMPLOYEES_PK |   99 |    2 |
+----------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   2 - access("SUBSIDIARY_ID"=30)
+```
+
+For a small subsidiary the index lookup is best. For a large one the full table scan overtakes it:
+
+```sql
+SELECT first_name, last_name
+  FROM employees
+ WHERE subsidiary_id = 20
+```
+
+```
+1000 rows selected.
+
+----------------------------------------------------
+| Id | Operation         | Name      | Rows | Cost |
+----------------------------------------------------
+|  0 | SELECT STATEMENT  |           | 1000 |  478 |
+|* 1 |  TABLE ACCESS FULL| EMPLOYEES | 1000 |  478 |
+----------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   1 - filter("SUBSIDIARY_ID"=20)
+```
+
+This is the histogram on `subsidiary_id` doing its job. The optimizer looks up how often the value in the statement occurs, gets two different row estimates for the two statements, and therefore two different costs. It picks the cheaper plan each time, which for the small subsidiary is the index.
+
+The cost of `TABLE ACCESS BY INDEX ROWID` is very sensitive to that estimate. Ten times the rows means ten times the cost, and at some point the indexed plan costs more than reading the whole table. That is where the optimizer switches to the scan for the big subsidiary.
+
+With a bind parameter there is no value to look up. The optimizer assumes the values are evenly spread, gets the same row estimate every time, the same costs, and therefore the same plan for every subsidiary.
+
+<Callout kind="tip">A histogram earns its keep when the values are unevenly distributed. For a column with a uniform spread it is usually enough to divide the row count by the number of distinct values, and that estimate works just as well with a bind parameter.</Callout>
+
+## 3. Variables versus constants
+
+Think of the optimizer as a compiler. A literal in the SQL text is a constant: the optimizer can use it while building the plan, the way a compiler folds a constant expression at compile time. A bind parameter is a variable: its value is unknown until the statement runs, and the optimizer never sees it.
+
+From that angle it is a little paradoxical that bind parameters improve performance, when literals are what let the optimizer find the best plan every time. The answer is the price. Generating and costing every plan variant is a lot of work, and it is wasted when the result would have been the same plan anyway.
+
+<Callout kind="tip">Skipping bind parameters means paying the optimizer for every execution, like rebuilding a binary before each run.</Callout>
+
+That leaves the database with a dilemma. Either it optimises every execution from scratch and always gets the best plan, or it reuses a cached plan and accepts the risk that the plan is wrong for this value. It cannot know whether a full optimisation would produce a different plan without doing the full optimisation. Vendors attack the problem with heuristics, and the results are mixed.
+
+<EngineTabs>
+  <Fragment slot="postgresql">
+  PostgreSQL plans the first five executions of a prepared statement with the actual values, a **custom plan** each time. If a **generic plan** costed without values is not estimated to be worse than the average of those, it switches to the generic plan and stops re-planning. `SET plan_cache_mode = force_custom_plan` keeps per-value planning for a statement that suffers from skew.
+  </Fragment>
+  <Fragment slot="mysql">
+  MySQL re-optimises a prepared statement on every execution with the bound values, so there is no generic plan and no skew problem, but also less reuse: the saving is in parsing, not planning. Many connectors emulate prepared statements on the client by splicing escaped values into the text; the injection protection holds, but the server never sees a parameter.
+  </Fragment>
+  <Fragment slot="oracle">
+  On the first execution Oracle **peeks** at the bound value and builds the plan for it; later executions reuse that plan whatever their values. **Adaptive cursor sharing** watches the actual row counts and, when they diverge from the estimate, builds additional plans for the same text, so a skewed column ends up with one plan per class of value after a few runs.
+  </Fragment>
+  <Fragment slot="sql-server">
+  SQL Server **sniffs** the parameter value at compile time and caches the plan built for it, so whichever value runs first decides the plan for everyone. `OPTION (RECOMPILE)` forces a fresh plan with the actual values on every execution, at the cost of the compile; `OPTION (OPTIMIZE FOR UNKNOWN)` asks for the average plan instead of the sniffed one.
+  </Fragment>
+  <Fragment slot="db2">
+  The `REOPT` bind option controls re-planning: `REOPT NONE` plans once without values, `REOPT ONCE` plans with the first set of values, `REOPT ALWAYS` plans on every execution with the actual values, which is the option for skewed columns.
+  </Fragment>
+</EngineTabs>
+
+As the developer you can resolve the dilemma yourself, because you know which values matter.
+
+<KeyIdea>Always use bind parameters, except for values that are meant to influence the execution plan.</KeyIdea>
+
+The classic example is a status column with a skewed distribution, `todo` and `done`. The `done` rows outnumber the `todo` rows by an order of magnitude, so an index only pays off for the `todo` search; a literal lets the optimizer see which one it is. Partitioning is another: when tables and indexes are split across storage areas, the value decides which partitions have to be read. And `LIKE` patterns can suffer from bind parameters too, as the [LIKE lesson](/sql/where-clause/searching-for-ranges/like-performance-tuning/) shows.
+
+<Callout kind="tip">In practice there are only a few cases where the value changes the plan. When in doubt, bind, if only to rule out SQL injection.</Callout>
+
+## 4. Binding in five languages
+
+The shape is always the same: a placeholder in the text, a value supplied through the API.
+
+<Callout kind="warning" title="Common mistake">Gluing the value into the SQL text, `" where subsidiary_id = " + subsidiary_id`. Every value produces a new statement text that is parsed and optimised from scratch, and a value that happens to contain SQL runs as SQL. Each language below shows the concatenated form first and the fix after it.</Callout>
+
+**C#**, without bind parameters:
+
+```
+int subsidiary_id;
+SqlCommand cmd = new SqlCommand(
+                   "select first_name, last_name"
+                 + "  from employees"
+                 + " where subsidiary_id = " + subsidiary_id
+                 , connection);
+```
+
+With a bind parameter:
+
+```
+int subsidiary_id;
+SqlCommand cmd =
+       new SqlCommand(
+                      "select first_name, last_name"
+                    + "  from employees"
+                    + " where subsidiary_id = @subsidiary_id"
+                    , connection);
+cmd.Parameters.AddWithValue("@subsidiary_id", subsidiary_id);
+```
+
+See the [SqlParameterCollection](https://learn.microsoft.com/en-us/dotnet/api/system.data.sqlclient.sqlparametercollection) documentation.
+
+**Java**, without bind parameters:
+
+```
+int subsidiary_id;
+Statement command = connection.createStatement();
+ResultSet rs = command.executeQuery(
+                    "select first_name, last_name"
+                  + "  from employees"
+                  + " where subsidiary_id = " + subsidiary_id
+                  );
+```
+
+With a bind parameter:
+
+```
+int subsidiary_id;
+PreparedStatement command = connection.prepareStatement(
+                    "select first_name, last_name"
+                  + "  from employees"
+                  + " where subsidiary_id = ?"
+                  );
+command.setInt(1, subsidiary_id);
+```
+
+See the [PreparedStatement](https://docs.oracle.com/javase/8/docs/api/java/sql/PreparedStatement.html) documentation.
+
+**Perl**, without bind parameters:
+
+```
+my $subsidiary_id;
+my $sth = $dbh->prepare(
+                  "select first_name, last_name"
+                . "  from employees"
+                . " where subsidiary_id = $subsidiary_id"
+                );
+$sth->execute();
+```
+
+With a bind parameter:
+
+```
+my $subsidiary_id;
+my $sth = $dbh->prepare(
+                  "select first_name, last_name"
+                . "  from employees"
+                . " where subsidiary_id = ?"
+                );
+$sth->execute($subsidiary_id);
+```
+
+See [Programming the Perl DBI](https://docstore.mik.ua/orelly/linux/dbi/ch05_03.htm).
+
+**PHP** with MySQL, without bind parameters:
+
+```
+$mysqli->query("select first_name, last_name"
+             . "  from employees"
+             . " where subsidiary_id = " . $subsidiary_id);
+```
+
+With a bind parameter:
+
+```
+if ($stmt = $mysqli->prepare("select first_name, last_name"
+                           . "  from employees"
+                           . " where subsidiary_id = ?"))
+{
+   $stmt->bind_param("i", $subsidiary_id);
+   $stmt->execute();
+} else {
+  /* handle SQL error */
+}
+```
+
+See [mysqli_stmt::bind_param](https://www.php.net/manual/en/mysqli-stmt.bind-param.php) and [prepared statements in PDO](https://www.php.net/manual/en/pdo.prepared-statements.php).
+
+**Ruby**, without bind parameters:
+
+```
+dbh.execute("select first_name, last_name"
+          + "  from employees"
+          + " where subsidiary_id = #{subsidiary_id}");
+```
+
+With a bind parameter:
+
+```
+dbh.prepare("select first_name, last_name"
+          + "  from employees"
+          + " where subsidiary_id = ?");
+dbh.execute(subsidiary_id);
+```
+
+See the [Ruby DBI tutorial](https://web.archive.org/web/20190228233411/http://www.kitebird.com/articles/ruby-dbi.html#TOC_8) on placeholders and parameter binding.
+
+<Callout kind="note" title="See also">The [dynamic SQL myth](/sql/myth-directory/dynamic-sql-is-slow/) page shows the same thing done through ORM tools.</Callout>
+
+## 5. Positional and named placeholders
+
+The question mark is the only placeholder the SQL standard defines. Question marks are **positional**: they are numbered from left to right, and you bind a value to a number. That gets awkward as soon as a placeholder is added or removed, because every number after it shifts. Most databases therefore offer **named parameters** as an extension, written with an at sign (`@name`) or a colon (`:name`).
+
+<Callout kind="note">A placeholder can hold a value. It cannot hold a table name, a column name or a piece of syntax.</Callout>
+
+So this does not work:
+
+```
+String sql = prepare("SELECT * FROM ? WHERE ?");
+
+sql.execute('employees', 'employee_id = 1');
+```
+
+When the structure of a statement has to change at runtime, build the text dynamically; the [dynamic SQL](/sql/myth-directory/dynamic-sql-is-slow/) page explains why that is not the performance problem it is reputed to be.
+
+## 6. Cursor sharing and forced parameterization
+
+The more elaborate the optimizer and the more complex the queries, the more plan caching matters. Oracle and SQL Server can therefore rewrite incoming statements and replace every literal with a bind parameter automatically. Oracle calls the setting `CURSOR_SHARING`; SQL Server calls it **forced parameterization**.
+
+Both are workarounds for applications that never bind. Switching them on also means a developer can no longer use a literal on purpose where the value should shape the plan. [Smart Logic](/sql/where-clause/obfuscation/smart-logic/) has more on the plan caches of the different databases, and the article [Planning for Execution Plan Reuse](https://use-the-index-luke.com/blog/2011-07-16/planning-for-reuse) goes deeper.
+
+## 7. Try it
+
+SQLite's `EXPLAIN QUERY PLAN` prints a `?` for every value, whether you wrote a literal or a placeholder, and in the playground's build it plans without looking at the value at all. That makes it a good illustration of the generic plan: run the query for the big subsidiary and the small one and compare the plan text.
+
+<TryIt id="2.7" setup={`CREATE INDEX emp_sub ON employees (subsidiary_id);`} tasks={[
+  { text: 'Run the query for subsidiary 20, which holds half of all employees. The plan says <code>SEARCH employees USING INDEX emp_sub (subsidiary_id=?)</code>.', sql: 'subsidiary_id\\s*=\\s*20', plan: 'USING INDEX emp_sub \\(subsidiary_id=\\?\\)' },
+  { text: 'Change the value to 30, a fifth of the employees. The plan text is identical: one plan, whatever the value.', sql: 'subsidiary_id\\s*=\\s*30', plan: 'USING INDEX emp_sub \\(subsidiary_id=\\?\\)' },
+]} sql={`SELECT first_name, last_name
+  FROM employees
+ WHERE subsidiary_id = 20;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>What a value-aware optimizer would do</summary><div class="d">With a histogram and a literal, Oracle could pick a different plan per subsidiary, as section 2 shows on the book's larger table. With a bound value it would do what SQLite does here: one plan for both.</div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="A query filters on subsidiary_id, which has ten distinct values of very different sizes. The application binds the value. What does the optimizer do?"
+  options={[
+    'It reads the histogram for the bound value and picks the best plan for that subsidiary.',
+    'It cannot see the value, so it costs the plan for an average subsidiary and reuses that plan for all of them.',
+    'It refuses to cache the plan, because a bound value makes caching impossible.',
+  ]}
+  answer={1}
+  explain="The plan is built before the value is known, so the histogram cannot be consulted. The optimizer assumes an even distribution and the cached plan serves every value. Each database has a mitigation, such as bind peeking or re-optimisation, but the default behaviour is one plan for all."
+/>

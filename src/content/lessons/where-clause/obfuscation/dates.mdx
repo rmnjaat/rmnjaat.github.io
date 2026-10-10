@@ -1,0 +1,285 @@
+---
+title: Date Types
+subtitle: Most obfuscations involve dates. Truncating, formatting or string-comparing a date column hides it from its index; an explicit range on the bare column does not.
+chapter: where-clause
+order: 7.1
+kind: lesson
+minutes: 10
+summary: Why TRUNC(sale_date) and DATE_FORMAT(sale_date) cannot use an index on sale_date, when a function-based index helps and when it does not, how to write continuous periods as explicit range conditions with helper functions for each database, why comparing dates as strings is the same mistake, and why LIKE on a date is an obfuscation in disguise.
+prereqs: "You should have read <a href='/sql/where-clause/functions/case-insensitive-search/'>Case-Insensitive Search</a> and <a href='/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates/'>Greater, Less and BETWEEN</a>."
+outcomes:
+  - Why TRUNC and date formatting functions block an index on the column
+  - When a function-based index on the date expression is and is not a good idea
+  - How to write any continuous period as an explicit range condition
+  - Why comparing dates as strings converts the column, and how to convert the search term instead
+  - Why LIKE on a date column is an obfuscation although it uses no function
+recap:
+  - Oracle's DATE always has a time component; TRUNC does not remove it, it sets it to midnight, and TRUNC(sale_date) is a different thing from sale_date.
+  - A function-based index on TRUNC(sale_date) works only if every query uses TRUNC; used inconsistently you need two indexes.
+  - Any continuous period, a quarter or a single day, is a range on the bare column, and a plain index on the column serves it.
+  - Convert the search term, not the column. Bind parameters support all data types, so pass a date as a date.
+  - LIKE forces a string comparison and converts the date column just like a function would.
+source: https://use-the-index-luke.com/sql/where-clause/obfuscation/dates
+---
+import { Callout, KeyIdea, EngineTabs, Check, TryIt } from '@/components/mdx';
+
+Most obfuscated conditions involve dates. Oracle is especially exposed because its `DATE` type always carries a time component, so people reach for a function to get rid of it. The function is what hides the column from its index.
+
+## 1. TRUNC on both sides
+
+The common habit is `TRUNC` to "remove" the time. It does not remove anything; it sets the time to midnight, because Oracle has no pure date type. To ignore the time in a comparison, `TRUNC` is applied to both sides, as in this search for yesterday's sales:
+
+```sql
+SELECT ...
+  FROM sales
+ WHERE TRUNC(sale_date) = TRUNC(sysdate - INTERVAL '1' DAY)
+```
+
+The statement is valid and correct, and it cannot make proper use of an index on `SALE_DATE`. The reason is the one from [Case-Insensitive Search](/sql/where-clause/functions/case-insensitive-search/): `TRUNC(sale_date)` is something else entirely than `SALE_DATE`. The database treats the function as an opaque step and cannot map its output onto the order of the index.
+
+## 2. A function-based index, and its catch
+
+The direct fix is a [function-based index](/sql/where-clause/functions/):
+
+```sql
+CREATE INDEX index_name
+          ON sales (TRUNC(sale_date))
+```
+
+The catch is consistency. Every query must now write `TRUNC(sale_date)`. If some do and some do not, you need two indexes.
+
+The problem is not limited to Oracle. Databases with a pure date type run into it as soon as the search covers a longer period, as this MySQL query does:
+
+```sql
+SELECT ...
+  FROM sales
+ WHERE DATE_FORMAT(sale_date, "%Y-%M")
+     = DATE_FORMAT(now()    , "%Y-%M")
+```
+
+The format keeps only year and month. Again a correct query with the same problem, and MySQL has function-based indexes only since 8.0.13 (5.7 can index a generated column instead), so on older versions the direct fix is not even available.
+
+## 3. The explicit range
+
+The alternative works everywhere: write the period as an explicit range condition.
+
+```sql
+SELECT ...
+  FROM sales
+ WHERE sale_date BETWEEN quarter_begin(?)
+                     AND quarter_end(?)
+```
+
+If you did the exercise on [employees who are 42 years old](/sql/where-clause/functions/user-defined-functions/), the pattern is familiar. A plain index on `SALE_DATE` serves this query. The functions `QUARTER_BEGIN` and `QUARTER_END` compute the boundary dates. That is slightly fiddly because [BETWEEN includes both boundaries](/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates/): if `SALE_DATE` has a time component, `QUARTER_END` has to return the last instant before the next quarter begins. The function hides that detail.
+
+<EngineTabs>
+  <Fragment slot="db2">
+  ```sql
+  CREATE FUNCTION quarter_begin(dt TIMESTAMP)
+  RETURNS TIMESTAMP
+  RETURN TRUNC(dt, 'Q')
+  ```
+
+  ```sql
+  CREATE FUNCTION quarter_end(dt TIMESTAMP)
+  RETURNS TIMESTAMP
+  RETURN TRUNC(dt, 'Q') + 3 MONTHS - 1 SECOND
+  ```
+  </Fragment>
+  <Fragment slot="mysql">
+  ```sql
+  CREATE FUNCTION quarter_begin(dt DATETIME)
+  RETURNS DATETIME DETERMINISTIC
+  RETURN CONVERT
+         (
+           CONCAT
+           ( CONVERT(YEAR(dt),CHAR(4))
+           , '-'
+           , CONVERT(QUARTER(dt)*3-2,CHAR(2))
+           , '-01'
+           )
+         , datetime
+         )
+  ```
+
+  ```sql
+  CREATE FUNCTION quarter_end(dt DATETIME)
+  RETURNS DATETIME DETERMINISTIC
+  RETURN DATE_ADD
+         ( DATE_ADD ( quarter_begin(dt), INTERVAL 3 MONTH )
+         , INTERVAL -1 MICROSECOND)
+  ```
+  </Fragment>
+  <Fragment slot="oracle">
+  ```sql
+  CREATE FUNCTION quarter_begin(dt IN DATE)
+  RETURN DATE
+  AS
+  BEGIN
+     RETURN TRUNC(dt, 'Q');
+  END
+  ```
+
+  ```sql
+  CREATE FUNCTION quarter_end(dt IN DATE)
+  RETURN DATE
+  AS
+  BEGIN
+     -- the Oracle DATE type has seconds resolution
+     -- subtract one second from the first
+     -- day of the following quarter
+     RETURN TRUNC(ADD_MONTHS(dt, +3), 'Q')
+          - (1/(24*60*60));
+  END
+  ```
+  </Fragment>
+  <Fragment slot="postgresql">
+  ```sql
+  CREATE FUNCTION quarter_begin(dt timestamp with time zone)
+  RETURNS timestamp with time zone AS $$
+  BEGIN
+     RETURN date_trunc('quarter', dt);
+  END;
+  $$ LANGUAGE plpgsql
+  ```
+
+  ```sql
+  CREATE FUNCTION quarter_end(dt timestamp with time zone)
+  RETURNS timestamp with time zone AS $$
+  BEGIN
+     RETURN   date_trunc('quarter', dt)
+            + interval '3 month'
+            - interval '1 microsecond';
+  END;
+  $$ LANGUAGE plpgsql
+  ```
+  </Fragment>
+  <Fragment slot="sql-server">
+  ```sql
+  CREATE FUNCTION quarter_begin (@dt DATETIME )
+  RETURNS DATETIME
+  BEGIN
+     RETURN DATEADD (qq, DATEDIFF (qq, 0, @dt), 0)
+  END
+  ```
+
+  ```sql
+  CREATE FUNCTION quarter_end (@dt DATETIME )
+  RETURNS DATETIME
+  BEGIN
+     RETURN DATEADD
+            ( ms
+            , -3
+            , DATEADD(mm, 3, dbo.quarter_begin(@dt))
+            );
+  END
+  ```
+  </Fragment>
+  <Fragment slot="sqlite">
+  SQLite has no date type. ISO 8601 strings sort chronologically, so a range on the text column works with a plain index:
+
+  ```sql
+  WHERE sale_date >= '2024-04-01'
+    AND sale_date <  '2024-07-01'
+  ```
+  </Fragment>
+</EngineTabs>
+
+Similar helpers work for other periods, and most are simpler than these, especially if you use `>=` and `<` instead of `BETWEEN`, which removes the "one second before" arithmetic. You can also compute the boundaries in the application.
+
+<KeyIdea title="Tip">
+
+A continuous period belongs in the where clause as a range on the bare column. That holds for a single day as much as for a quarter; in Oracle:
+
+```sql
+sale_date >= TRUNC(sysdate)
+AND sale_date <  TRUNC(sysdate + INTERVAL '1' DAY)
+```
+
+</KeyIdea>
+
+## 4. Dates compared as strings
+
+Another frequent obfuscation compares dates as text, as in this PostgreSQL example:
+
+```sql
+SELECT ...
+  FROM sales
+ WHERE TO_CHAR(sale_date, 'YYYY-MM-DD') = '1970-01-01'
+```
+
+Once more the problem is the conversion of `SALE_DATE`. Conditions like this are often written in the belief that only numbers and strings can be passed to the database. [Bind parameters](/sql/where-clause/bind-parameters/) support every data type; a `java.util.Date` object, for instance, is a perfectly good parameter. That is one more benefit of using them.
+
+If you cannot pass a date, convert the search term instead of the column:
+
+```sql
+SELECT ...
+  FROM sales
+ WHERE sale_date = TO_DATE('1970-01-01', 'YYYY-MM-DD')
+```
+
+This uses a plain index on `SALE_DATE`, and it converts the input once. The first version had to convert every date in the table before it could compare anything.
+
+Either change, bind parameter or converted search term, can introduce a bug if `SALE_DATE` has a time component: the equality then matches only sales at exactly midnight. Use an explicit range in that case:
+
+```sql
+SELECT ...
+  FROM sales
+ WHERE sale_date >= TO_DATE('1970-01-01', 'YYYY-MM-DD')
+   AND sale_date <  TO_DATE('1970-01-01', 'YYYY-MM-DD')
+                  + INTERVAL '1' DAY
+```
+
+Whenever you compare dates, consider the explicit range first.
+
+## 5. LIKE on a date
+
+This one is especially sneaky because it uses no function at all:
+
+```sql
+sale_date LIKE SYSDATE
+```
+
+`LIKE` is a string operator and forces a string comparison. Depending on the database that is an error or an implicit conversion of both sides. Oracle's predicate information shows what it did:
+
+```
+filter( INTERNAL_FUNCTION(SALE_DATE)
+        LIKE TO_CHAR(SYSDATE@!))
+```
+
+`INTERNAL_FUNCTION` is the type conversion applied to `SALE_DATE`. Like any other function on the column, it rules out a plain index on it.
+
+<Callout kind="warning" title="Common mistake">Thinking that a condition without a visible function is safe. `LIKE` on a date, or any comparison between a date column and a string, can add a conversion you never wrote. If the plan shows `INTERNAL_FUNCTION`, `CAST` or `TO_CHAR` around the column, that is the obfuscation.</Callout>
+
+## 6. Try it
+
+SQLite keeps dates as ISO strings, and its date function `strftime` plays the role of `DATE_FORMAT` here. The playground has an index on `sale_date`.
+
+<TryIt id="2.7.1" tasks={[
+  { text: 'Run the query. 938 sales, and the plan is a <code>SCAN</code>: the function on <code>sale_date</code> hides the column from the index.', sql: 'strftime', plan: '^SCAN sales' },
+  { text: 'Rewrite it as an explicit range for the same month, <code>sale_date &gt;= \'2024-06-01\' AND sale_date &lt; \'2024-07-01\'</code>. Same 938 sales, and the plan uses <code>sales_date</code> with both bounds.', sql: "sale_date\\s*>=\\s*'2024-06-01'\\s+and\\s+sale_date\\s*<\\s*'2024-07-01'", plan: 'sales_date \\(sale_date>\\? AND sale_date<\\?\\)' },
+  { text: 'Try a single day as a range: <code>&gt;= \'2024-06-15\' AND &lt; \'2024-06-16\'</code>. Same plan shape, 31 rows.', sql: "sale_date\\s*>=\\s*'2024-06-15'\\s+and\\s+sale_date\\s*<\\s*'2024-06-16'", plan: 'sale_date>\\? AND sale_date<\\?' },
+]} setup={`CREATE INDEX sales_date ON sales (sale_date); ANALYZE;`} sql={`SELECT count(*), sum(eur_value)
+  FROM sales
+ WHERE strftime('%Y-%m', sale_date) = '2024-06';`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 2</summary><div class="d">The upper bound is the first day of the next month, excluded. That is the half-open form that needs no "one second before" arithmetic.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT count(&#42;), sum(eur&#95;value) FROM sales
+ WHERE sale&#95;date &gt;= '2024-06-01' AND sale&#95;date &lt; '2024-07-01';
+-- plan: SEARCH sales USING INDEX sales&#95;date (sale&#95;date&gt;? AND sale&#95;date&lt;?)
+SELECT count(&#42;), sum(eur&#95;value) FROM sales
+ WHERE sale&#95;date &gt;= '2024-06-15' AND sale&#95;date &lt; '2024-06-16';</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="sale_date is an Oracle DATE column with an index. Which condition finds yesterday's sales through the index?"
+  options={[
+    "TRUNC(sale_date) = TRUNC(sysdate - INTERVAL '1' DAY)",
+    "sale_date >= TRUNC(sysdate - INTERVAL '1' DAY) AND sale_date < TRUNC(sysdate)",
+    "TO_CHAR(sale_date, 'YYYY-MM-DD') = TO_CHAR(sysdate - 1, 'YYYY-MM-DD')",
+  ]}
+  answer={1}
+  explain="TRUNC and TO_CHAR wrap the column in a function, so the index on sale_date cannot be used. The explicit range leaves the column bare, covers every second of yesterday, and is served by a plain index as a range scan."
+/>

@@ -1,0 +1,53 @@
+---
+title: The Equals Operator
+subtitle: An exact-key lookup is the simplest thing an index can do. It is also where column order and bind values start to matter.
+chapter: where-clause
+order: 1
+kind: lesson
+minutes: 3
+summary: Why the where clause is the first place to look for a slow query, why equality is both the easiest and the most often mishandled predicate, and what the three lessons on primary keys, concatenated keys and slow indexes cover.
+prereqs: "You should have finished <a href='/sql/anatomy/'>Anatomy of an Index</a> and know the two ingredients of a slow index: a wide range scan and many table accesses."
+outcomes:
+  - Why a careless where clause is the first ingredient of a slow query
+  - What this unit covers, from operators to anti-patterns
+  - Why where clauses with several conditions are the ones to watch
+recap:
+  - The where clause is the search condition, and finding rows is the core job of an index. Write it carelessly and the database scans a large part of the index.
+  - Equality is the predicate a B-tree serves best, and the one most often indexed wrongly, especially when several conditions are combined.
+  - A primary key gets a unique index for free. A concatenated index is only usable for queries that cover its leading columns.
+  - An index that matches only part of the where clause can still be slow. The execution plan shows which part it matched.
+source: https://use-the-index-luke.com/sql/where-clause/the-equals-operator
+---
+import { KeyIdea, Check } from '@/components/mdx';
+
+Unit 1 took the index apart and showed what makes one slow. This unit turns that knowledge around: how do you recognise those problems in an SQL statement, and how do you write statements that avoid them? The where clause is the place to start.
+
+## 1. Why the where clause comes first
+
+The where clause states the search condition, and finding rows that match a condition is the one thing an index exists to do. That gives the where clause an outsized effect on performance. It is also the part of a statement most often written without a second thought, and a careless condition leaves the database no choice but to read a large part of the index.
+
+<KeyIdea>A poorly written where clause is the first ingredient of a slow query.</KeyIdea>
+
+The unit goes operator by operator: how each one affects index usage, and how to define an index so that as many queries as possible can use it. [Searching for ranges](/sql/where-clause/searching-for-ranges/), [partial indexes](/sql/where-clause/partial-and-filtered-indexes/) and [NULL](/sql/where-clause/null/) follow the material here, and the last group, [obfuscated conditions](/sql/where-clause/obfuscation/), collects the common anti-patterns and shows what to write instead.
+
+## 2. Equality, the easy case that still goes wrong
+
+`=` is the most trivial operator in SQL and the one used most. That does not make it safe. Indexing mistakes that cost real performance are still common around it, and where clauses that combine several conditions are the most exposed. This group of lessons shows how to confirm that an index is actually used, how a concatenated index can serve a combined condition, and, by taking a slow query apart, what the causes from unit 1 look like in practice.
+
+[Primary Keys](/sql/where-clause/the-equals-operator/primary-keys/) looks at a lookup by primary key. The index comes with the constraint, the lookup is a unique scan, and the lesson shows how to verify that in the execution plan of each database.
+
+[Concatenated Keys](/sql/where-clause/the-equals-operator/concatenated-keys/) adds a second column to the key. The same index becomes useless for one of the two queries, and the fix is nothing more than swapping the column order.
+
+[Slow Indexes, Part II](/sql/where-clause/the-equals-operator/slow-indexes-part-ii/) returns to the first ingredient of a slow index. An index that covers only part of the where clause still gets used, reads far more than it needs to, and sometimes the optimizer rightly gives up on it.
+
+<Check
+  client:visible
+  question="A query is slow and its plan shows an index. Based on this unit's opening, where should you look first?"
+  options={[
+    'At the hardware, because an indexed query cannot be improved further in SQL.',
+    'At the where clause: how much of it the index resolved, and how much of the index was scanned.',
+    'At the select list, because fetching fewer columns is the main lever.',
+  ]}
+  answer={1}
+  explain="The where clause decides how much of the index the database reads. An index that matches only part of the condition can leave a wide range scan and many table accesses in place. That is the first ingredient of a slow query, and the next three lessons show how to spot it."
+/>

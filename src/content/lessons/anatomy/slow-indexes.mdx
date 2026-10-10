@@ -1,0 +1,225 @@
+---
+title: Slow Indexes, Part I
+subtitle: The tree traversal is fast and bounded. Following the leaf chain and fetching rows from the table is neither, and that is where slow indexes come from.
+chapter: anatomy
+order: 3
+kind: lesson
+minutes: 10
+summary: Why an index lookup can be slow even though the tree traversal is fast, the two ingredients that make it slow, the three steps of a lookup and the operation names each database uses for them.
+prereqs: "You should have read <a href='/sql/anatomy/the-tree/'>The B-tree</a> and be able to describe how a lookup walks from the root to a leaf."
+outcomes:
+  - Where the myth of the "degenerated index" comes from and why a rebuild does not fix a slow index
+  - "The two ingredients that make an index lookup slow: the leaf node chain and the table access"
+  - The three steps of every index lookup, and which one is the only bounded step
+  - What INDEX UNIQUE SCAN, INDEX RANGE SCAN and TABLE ACCESS BY INDEX ROWID mean, and their names in other databases
+recap:
+  - An index lookup is three steps, not one. Traverse the tree, follow the leaf chain, fetch each matching row from the table. Only the first step has an upper bound.
+  - The leaf chain scan grows with the number of matching entries. The table access adds one block read per matching row, and that is usually the expensive part.
+  - INDEX UNIQUE SCAN does the traversal only and stays constant. INDEX RANGE SCAN follows the chain for as long as entries match, which can be most of the index; TABLE ACCESS BY INDEX ROWID then runs once per hit.
+  - A slow index is almost never a broken tree. Rebuilding it changes nothing in the long run. Look at how many entries the scan visits instead.
+source: https://use-the-index-luke.com/sql/anatomy/slow-indexes
+---
+import { Callout, KeyIdea, Check, TryIt, EngineTabs, IndexAccess } from '@/components/mdx';
+
+The tree traversal in the previous lesson is as fast as a lookup can be. And yet queries that use an index are slow often enough that a whole folklore has grown up around it. The folklore has the cause wrong. The real cause follows directly from the two structures you have already seen.
+
+## 1. The myth of the degenerated index
+
+When a lookup through an index takes longer than it should, the traditional diagnosis is that the index has "degenerated": the tree has become unbalanced or fragmented, and the cure is to rebuild it. The rebuild is run, the query looks a little better for a day because its blocks are freshly cached, and a month later the ticket is back.
+
+Take it as given for now that rebuilding an index does not improve performance in the long run. The [myth directory](/sql/myth-directory/indexes-can-degenerate/) goes through the argument in detail. What this lesson does is show where the time actually goes, so that the next time an indexed query is slow you know what to look at instead.
+
+## 2. First ingredient: the leaf node chain
+
+Go back to the search for 57 in [Figure 1.5](/sql/anatomy/the-tree/). The traversal lands on a leaf that holds two entries for 57. Is that all of them? The leaf cannot say. The next leaf along the chain starts with whatever key comes after the last one here, and if the last one here is 57, the next leaf might begin with more 57s. The database has to read the next leaf to find out.
+
+So a lookup is not the traversal alone. After reaching the first matching entry, the database follows the doubly linked list for as long as entries keep matching, and that walk is as long as the number of matches makes it.
+
+## 3. Second ingredient: the table access
+
+The second ingredient is in [Figure 1.2](/sql/anatomy/the-leaf-nodes/). Even one leaf node can hold a great many hits, often hundreds, and the entries only carry ROWIDs. The rows themselves are in the table, and the table is a heap: the rows for neighbouring index entries sit in unrelated blocks scattered across the table. Every hit therefore costs an extra block read to fetch its row.
+
+## 4. Three steps, and only one of them is bounded
+
+Put together, reading rows through an index means:
+
+1. Traverse the tree to the first leaf entry that matches the `WHERE` clause.
+2. Follow the leaf node chain for as long as entries keep matching.
+3. For every matching entry, fetch the row it points to from the table.
+
+<KeyIdea>Only the tree traversal has an upper bound: the depth of the index, four or five reads. The chain walk and the table fetches can touch any number of blocks, and they are what makes an index lookup slow.</KeyIdea>
+
+This is the whole explanation of the myth. If you believe a lookup is just the traversal, a slow lookup can only mean a broken tree. Once you know there are three steps, the slow cases stop being mysterious: they are the ones where steps 2 and 3 do a lot of work.
+
+## 5. The best case: one entry, one row
+
+When the `WHERE` clause pins down a key that can occur at most once, because a primary key or a unique constraint guarantees it, there is no chain to follow. The traversal finds the single entry and one more read fetches the row.
+
+```sql
+SELECT sale_date, eur_value
+  FROM sales
+ WHERE sale_id = 4711;
+```
+
+<IndexAccess client:visible n="1.7" unique />
+
+Oracle calls this an **INDEX UNIQUE SCAN**: traversal only, used when a unique constraint ensures that at most one entry can match. A handful of block reads, and the same handful whether the table has a thousand rows or a billion. This is the picture most people have in their head when they hear "the query uses an index", and it is the exception.
+
+## 6. The general case: a range of entries
+
+Now ask for every sale in June.
+
+```sql
+SELECT sale_id, eur_value
+  FROM sales
+ WHERE sale_date >= '2024-06-01'
+   AND sale_date <  '2024-07-01';
+```
+
+<IndexAccess client:visible n="1.8" leaves={3} rows={6} />
+
+The traversal is the same and lands on the first entry for June. Then the chain walk begins, entry by entry along the linked list, until the first entry for July. The number of leaf nodes it has to read depends only on how many entries fall in the range: a few for a month, hundreds for a year. For each entry, a table access fetches the row from wherever it sits. In the figure, six matching rows mean six table blocks read one at a time in index order, which has nothing to do with their order on disk. In a real query a few thousand matching rows mean a few thousand of those reads, and that is what the user waits for.
+
+Oracle calls the traversal plus chain walk an **INDEX RANGE SCAN**. It is the fallback whenever more than one entry could match, which is to say for most queries. The per-row fetch is a **TABLE ACCESS BY INDEX ROWID**, and it usually runs once for every entry the range scan produced.
+
+<Callout kind="important">Nothing stops a range scan from walking most of the index. Add one table access per row on top of that, and the query is slow with an index. That, and not a broken tree, is the slow index.</Callout>
+
+<Callout kind="warning" title="Common mistake">"The plan says the index is used, so the query is as fast as it can be." The plan tells you which path was taken. It does not tell you how far along the chain the walk went or how many rows were fetched. A range scan that matches ten rows is nearly as cheap as a unique scan; one that matches a hundred thousand can read more blocks than a full table scan, because the table scan reads big sequential chunks while the index fetches one random block per row. Look at the row counts, not the operation name.</Callout>
+
+[Unit 2](/sql/where-clause/) is about keeping the scanned range narrow. [Unit 5](/sql/clustering/) is about making the table access cheaper when the range cannot be narrowed.
+
+## 7. The names in each database
+
+You do not have to guess which steps a query performed. Every database will tell you, under its own names. The tabs show the June query with an index on `sale_date`.
+
+<EngineTabs>
+  <Fragment slot="oracle">
+  Oracle is the most explicit and shows the steps as separate lines, innermost first. Read from the bottom up: the range scan produces ROWIDs, the table access consumes them.
+
+  ```
+  ----------------------------------------------------------------------
+  | Id | Operation                   | Name       | Rows | Cost (%CPU)|
+  ----------------------------------------------------------------------
+  |  0 | SELECT STATEMENT            |            |  938 |   47   (0)|
+  |  1 |  TABLE ACCESS BY INDEX ROWID| SALES      |  938 |   47   (0)|
+  |* 2 |   INDEX RANGE SCAN          | SALES_DATE |  938 |    4   (0)|
+  ----------------------------------------------------------------------
+  ```
+
+  For the lookup by `sale_id`, line 2 becomes `INDEX UNIQUE SCAN` on `SALES_PK` with `Rows` equal to 1.
+  </Fragment>
+  <Fragment slot="postgresql">
+  PostgreSQL's `Index Scan` does the range scan and the table access as one operation. `Index Cond` is the condition that bounds the chain walk.
+
+  ```
+  Index Scan using sales_date on sales  (cost=0.29..47.15 rows=938 width=12)
+    Index Cond: ((sale_date >= '2024-06-01'::date) AND (sale_date < '2024-07-01'::date))
+  ```
+
+  When many rows match, the planner switches to a `Bitmap Index Scan` that collects the matching ROWIDs first and a `Bitmap Heap Scan` that visits the table blocks in physical order. Same three steps, reordered so the random reads become sequential.
+
+  ```
+  Bitmap Heap Scan on sales  (cost=14.56..211.40 rows=938 width=12)
+    Recheck Cond: ((sale_date >= '2024-06-01'::date) AND (sale_date < '2024-07-01'::date))
+    ->  Bitmap Index Scan on sales_date  (cost=0.00..14.33 rows=938 width=0)
+          Index Cond: ((sale_date >= '2024-06-01'::date) AND (sale_date < '2024-07-01'::date))
+  ```
+
+  An `Index Only Scan` means step three was skipped because every column the query needs is in the index. The unique case is an `Index Scan` with `rows=1`.
+  </Fragment>
+  <Fragment slot="mysql">
+  MySQL's `EXPLAIN` is a table, and the `type` column names the access path. `range` is an index range scan; `ref` is a range scan on an equality condition; `eq_ref` and `const` are unique lookups. The table access is implied and never shown separately.
+
+  ```
+  id  select_type  table  type   possible_keys  key         key_len  ref   rows  Extra
+   1  SIMPLE       sales  range  sales_date     sales_date  3        NULL  938   Using index condition
+  ```
+
+  The unique lookup by primary key looks like this:
+
+  ```
+  id  select_type  table  type   possible_keys  key      key_len  ref    rows  Extra
+   1  SIMPLE       sales  const  PRIMARY        PRIMARY  4        const  1     NULL
+  ```
+  </Fragment>
+  <Fragment slot="sql-server">
+  SQL Server shows an `Index Seek` for the range scan and a separate lookup for the table access: `Key Lookup` when the table has a clustered index, `RID Lookup` when it is a heap. The two are joined by a `Nested Loops` operator.
+
+  ```
+  |--Nested Loops(Inner Join, OUTER REFERENCES:([Bmk1000]))
+       |--Index Seek(OBJECT:([sales].[sales_date]),
+       |     SEEK:([sale_date] >= '2024-06-01' AND [sale_date] < '2024-07-01') ORDERED FORWARD)
+       |--Key Lookup(OBJECT:([sales].[sales_pk]), SEEK:([sale_id]=[sale_id]) LOOKUP ORDERED FORWARD)
+  ```
+
+  A lookup by primary key on a clustered table is a single `Clustered Index Seek`, because the row itself lives in the leaf of the clustered index.
+  </Fragment>
+  <Fragment slot="db2">
+  Db2's plan graph from `db2exfmt` shows `IXSCAN` on the index feeding a `FETCH` from the table. The numbers above each operator are the estimated rows.
+
+  ```
+            938
+           FETCH
+           (  2)
+          /------+------\
+        938            20000
+       IXSCAN     TABLE: SALES
+       (  3)
+         |
+       20000
+   INDEX: SALES_DATE
+  ```
+
+  A unique lookup has the same shape with 1 as the row estimate above `IXSCAN` and `FETCH`.
+  </Fragment>
+  <Fragment slot="sqlite">
+  SQLite has two words. `SCAN` reads a whole table or a whole index; `SEARCH ... USING INDEX` is a tree traversal followed by a chain walk, and covers both the unique and the range case. The condition in parentheses is what bounds the walk. The table access is implied; `USING COVERING INDEX` means it was skipped.
+
+  ```
+  SEARCH sales USING INDEX sales_date (sale_date>? AND sale_date<?)
+  ```
+
+  A lookup by `sale_id`, which is SQLite's rowid, shows as `SEARCH sales USING INTEGER PRIMARY KEY (rowid=?)`.
+  </Fragment>
+</EngineTabs>
+
+## 8. Try it yourself
+
+Start with the unique lookup, then the June range without an index, then build the index and run the range again. Watch how the plan changes, and notice what it does not tell you.
+
+<TryIt id="1.3" tasks={[
+  { text: 'Run the lookup by <code>sale_id</code> as it is. The plan says <code>USING INTEGER PRIMARY KEY</code>: traversal, one row, done.', sql: 'sale_id\\s*=\\s*4711', plan: 'INTEGER PRIMARY KEY' },
+  { text: 'Replace it with the June query from section 6 (<code>sale_date</code> between <code>2024-06-01</code> and <code>2024-07-01</code>). With no index on <code>sale_date</code> the plan is a plain <code>SCAN sales</code>. Note the row count: 938.', sql: 'sale_date\\s*>=', plan: '^SCAN sales$' },
+  { text: 'Create an index on <code>sales (sale_date)</code>, then run the June query again. The plan becomes <code>SEARCH sales USING INDEX sales_date (...)</code>. Now widen the range to the whole of 2024: the plan does not change, the row count goes up twelvefold.', sql: 'sale_date\\s*>=', plan: 'SEARCH sales USING INDEX sales_date' },
+]} sql={`SELECT sale_date, eur_value
+  FROM sales
+ WHERE sale_id = 4711;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 3</summary><div class="d">Run the <code>CREATE INDEX</code> on its own first (there is no plan for it), then paste the June query back in. The database in this playground keeps the index until you reload the page.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT sale&#95;id, eur&#95;value
+  FROM sales
+ WHERE sale&#95;date &gt;= '2024-06-01'
+   AND sale&#95;date &lt;  '2024-07-01';
+-- plan: SCAN sales
+CREATE INDEX sales&#95;date ON sales (sale&#95;date);
+SELECT sale&#95;id, eur&#95;value
+  FROM sales
+ WHERE sale&#95;date &gt;= '2024-06-01'
+   AND sale&#95;date &lt;  '2024-07-01';
+-- plan: SEARCH sales USING INDEX sales&#95;date (sale&#95;date&gt;? AND sale&#95;date&lt;?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+The part in parentheses is the condition that bounds the chain walk. The plan tells you which path was taken; it does not tell you how long the path is. Unit 3, [Testing and Scalability](/sql/testing-scalability/), is about the trouble that causes.
+
+<Check
+  client:visible
+  question="An INDEX RANGE SCAN matches 5,000 entries. How much of the work does the tree traversal account for?"
+  options={[
+    'Almost all of it. The tree is the index.',
+    'A few block reads. The leaf chain walk and, above all, the 5,000 table accesses do the rest.',
+    'None. A range scan does not use the tree.',
+  ]}
+  answer={1}
+  explain="The traversal finds the first matching entry in four or five reads and is then finished. Everything after it, the chain and the one random table read per matching row, grows with the number of matches. That is where the time goes."
+/>

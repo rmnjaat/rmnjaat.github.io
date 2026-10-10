@@ -1,0 +1,175 @@
+---
+title: SQL Server
+subtitle: Estimated and actual plans from SET SHOWPLAN_TEXT, STATISTICS PROFILE and the graphical plan, the seek and lookup operators, and Seek Predicates versus Predicate.
+section: explain-plan
+order: 4
+summary: Reading SQL Server execution plans for indexing work. SHOWPLAN_TEXT, STATISTICS PROFILE, graphical and cached plans, Index Seek versus Index Scan, Key Lookup and RID Lookup, join and aggregate operators, Seek Predicates versus Predicate, and STATISTICS IO.
+source: https://use-the-index-luke.com/sql/explain-plan/sql-server/getting-an-execution-plan
+---
+import { Callout } from '@/components/mdx';
+
+## Getting an execution plan
+
+SQL Server distinguishes the estimated plan, produced without running the statement, from the actual plan, captured while it runs. Both come in text, XML and graphical form.
+
+The text form of the estimated plan is a session setting. Everything executed while it is on returns its plan instead of its result.
+
+```sql
+SET SHOWPLAN_TEXT ON;
+GO
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name = 'Winand';
+GO
+SET SHOWPLAN_TEXT OFF;
+GO
+```
+
+`SET SHOWPLAN_ALL ON` returns the same tree with estimate columns (`EstimateRows`, `EstimateIO`, `EstimateCPU`, `TotalSubtreeCost`); `SET SHOWPLAN_XML ON` returns the full XML that graphical tools render.
+
+For the actual plan in text form, `SET STATISTICS PROFILE ON` executes the statement, returns the result, and follows it with the plan tree plus `Rows` and `Executes` columns that hold what each operator really did. `SET STATISTICS XML ON` does the same in XML. Add the two counters that every indexing investigation needs.
+
+```sql
+SET STATISTICS IO ON;
+SET STATISTICS TIME ON;
+SET STATISTICS PROFILE ON;
+GO
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name = 'Winand';
+GO
+```
+
+In SQL Server Management Studio and Azure Data Studio, two toolbar buttons do the same job. "Display Estimated Execution Plan" (Ctrl+L) explains the highlighted statement without running it; "Include Actual Execution Plan" (Ctrl+M) captures the plan of every statement you execute next, in the "Execution plan" tab of the results pane. Both render the XML as a diagram. Hover an operator for its tooltip, or open the Properties pane (F4) for the full list, including the predicates discussed below. Read the diagram from right to left: the rightmost operators run first and feed the ones to their left.
+
+The graphical plan is the easiest to read and the hardest to share: the diagram itself shows only the operators and the objects they touch, and the predicates, the part that matters for indexing, live in tooltips. The tabular plan from `STATISTICS PROFILE` is the opposite. Its `StmtText` column is too wide to read comfortably in the grid, but it carries everything, and copying it into a mail, a ticket or a forum post loses nothing. A small example, slightly reformatted:
+
+```
+SELECT COUNT(*) FROM employees;
+  |--Compute Scalar(DEFINE:([Expr1004]=CONVERT_IMPLICIT(int,[Expr1005],0)))
+       |--Stream Aggregate(DEFINE:([Expr1005]=Count(*)))
+            |--Index Scan(OBJECT:([employees].[employees_pk]))
+```
+
+Plans of statements that ran before, or in other sessions, are in the plan cache.
+
+```sql
+SELECT st.text, qp.query_plan
+  FROM sys.dm_exec_query_stats AS qs
+ CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st
+ CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) AS qp
+ WHERE st.text LIKE '%employees%';
+```
+
+Clicking the `query_plan` XML in Management Studio opens it as a diagram. Cached plans are estimated plans; they carry no actual row counts. Since SQL Server 2019, `sys.dm_exec_query_plan_stats` returns the last actual plan when lightweight profiling is enabled, and Query Store keeps plans with runtime statistics over time.
+
+<Callout kind="warning" title="Statistics settings stay on">`SET STATISTICS PROFILE`, `IO` and `TIME` remain in effect for the session, and `SHOWPLAN_TEXT` stops statements from executing at all. Switch them off when done, or use a separate query window.</Callout>
+
+## Operations
+
+A SQL Server plan is a tree of operators. In text form, the `|--` markers show the nesting; a child is indented under its parent and the first child listed is the outer input of a join.
+
+| Operation | What it means |
+| --- | --- |
+| `Index Seek` | B-tree traversal into a nonclustered index followed by a walk along the leaf level for the matching range. Covers both unique lookups and range scans. |
+| `Index Scan` | Reads the whole nonclustered index, leaf level in order. No range is used. |
+| `Clustered Index Seek` | The same traversal in the clustered index, which holds the table rows themselves. A primary key lookup on a table with a clustered primary key looks like this. |
+| `Clustered Index Scan` | The full table scan of a table that has a clustered index. |
+| `Table Scan` | Full scan of a heap, a table without a clustered index. |
+| `Key Lookup` | Fetches the table row from the clustered index using the clustered key stored in a nonclustered index entry. One execution per matching entry. In text plans it appears as a `Clustered Index Seek` marked `LOOKUP`. |
+| `RID Lookup` | The same fetch for a heap, using the physical row identifier. |
+| `Nested Loops` | For each row of the outer (upper) input, runs the inner input. The pairing of an `Index Seek` with a `Key Lookup` is always a `Nested Loops`. |
+| `Hash Match` | Hash join when it has two inputs; hash aggregation (`Aggregate`) when it has one. Builds a hash table from the first input. |
+| `Merge Join` | Joins two inputs ordered by the join key. Requires sorted inputs, from an index or from a `Sort`. |
+| `Sort` | Explicit sort. `Top N Sort` keeps only the first N rows for a `TOP` with `ORDER BY`. The actual plan warns when it spilled to tempdb. |
+| `Stream Aggregate` | Grouping on input that already arrives in group order, typically from an index. Returns the first group before reading the last. |
+| `Top` | Stops its child after the requested number of rows. Only cheap when the child delivers rows one at a time in the required order. |
+| `Filter` | A predicate evaluated as a separate step because it could not be pushed into the operator that produced the rows. |
+| `Compute Scalar` | Evaluates expressions in the select list, such as the type conversion of a `COUNT(*)` result; harmless on its own. |
+
+The naming is consistent: a seek reads a specific part of an index, a scan reads the whole thing. A `Top` above a seek is cheap, a `Top` above a `Sort` is not, because the sort has to finish before it knows which rows come first. The [top-N lesson](/sql/partial-results/top-n-queries/) is about keeping the `Sort` out of that picture.
+
+## Access predicates and filter predicates
+
+The properties of a seek operator hold two separate entries. **Seek Predicates** is the condition that defines the range read from the B-tree. **Predicate** is a condition checked against each row after it is read, sometimes called the residual predicate. The text form prints them as `SEEK:(…)` and `WHERE:(…)`.
+
+```sql
+CREATE INDEX emp_sub_name ON employees (subsidiary_id, last_name);
+
+SET SHOWPLAN_TEXT ON;
+GO
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name = 'Winand';
+GO
+```
+
+```
+  |--Nested Loops(Inner Join, OUTER REFERENCES:([employees].[employee_id], [employees].[subsidiary_id]))
+       |--Index Seek(OBJECT:([dbo].[employees].[emp_sub_name]), SEEK:([employees].[subsidiary_id]=(20) AND [employees].[last_name]=N'Winand') ORDERED FORWARD)
+       |--Clustered Index Seek(OBJECT:([dbo].[employees].[employees_pk]), SEEK:([employees].[employee_id]=[employees].[employee_id] AND [employees].[subsidiary_id]=[employees].[subsidiary_id]) LOOKUP ORDERED FORWARD)
+```
+
+Both conditions are inside `SEEK:()`. The seek reads the 33 entries for (20, Winand) and nothing else. Each entry then drives one `Key Lookup` (the `Clustered Index Seek` marked `LOOKUP`) to fetch the columns the index does not carry, which is why the two are wrapped in a `Nested Loops`.
+
+```sql
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE last_name = 'Winand';
+```
+
+```
+  |--Clustered Index Scan(OBJECT:([dbo].[employees].[employees_pk]), WHERE:([employees].[last_name]=N'Winand'))
+```
+
+With no condition on the leading index column, the optimizer reads the whole table through its clustered index and applies the condition as a `WHERE:()`, a plain filter. On a wide table it may instead choose an `Index Scan` over `emp_sub_name` with the same `WHERE:()`, followed by lookups; that is still a full read of the index, not a seek.
+
+```sql
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name LIKE '%and';
+```
+
+```
+       |--Index Seek(OBJECT:([dbo].[employees].[emp_sub_name]), SEEK:([employees].[subsidiary_id]=(20)),  WHERE:([employees].[last_name] like N'%and') ORDERED FORWARD)
+```
+
+Now the operator has both. `SEEK:()` holds only `subsidiary_id = 20`, so the seek walks all 500 entries of that subsidiary. `WHERE:()` holds the `LIKE`, which is evaluated on each of those entries before the lookup, so only 33 lookups happen. In the graphical plan the same operator shows "Seek Predicates" with the equality and "Predicate" with the `LIKE`.
+
+The clearest signal is in the actual plan. Since SQL Server 2016 the seek operator reports both **Number of Rows Read**, the entries it had to examine, and **Actual Number of Rows**, the ones it returned. For the equality query both are 33. For the `LIKE` query, Rows Read is 500 and Actual Rows is 33, and the difference is exactly the work the filter predicate caused. Management Studio flags a large gap with a warning icon on the operator.
+
+The gap pattern applies here too. With an index on `(subsidiary_id, last_name, first_name)` and `WHERE subsidiary_id = 20 AND first_name = 'Markus'`, the seek shows `SEEK:([subsidiary_id]=(20))` and `WHERE:([first_name]=N'Markus')`. Both columns are in the index, but the entries of subsidiary 20 are ordered by `last_name`, so `first_name` cannot bound the seek. In the graphical plan this is the difference between the "Seek Predicates" and the "Predicate" entries of the same tooltip; the tabular plan shows both inside one `StmtText` line, which is why it is the better form to post when asking for help.
+
+<Callout kind="warning" title="A filter on an index column is still a filter">An `Index Seek` whose `Predicate` is doing most of the filtering reads a range that grows with the table. It passes every test on a small database and fails in production under load. Treat every condition that is not in `Seek Predicates` as a filter. The [range lesson](/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates/) explains the split by example and the [data volume lesson](/sql/testing-scalability/data-volume/) measures it.</Callout>
+
+<Callout kind="note" title="A Filter operator means the predicate came late">When the residual predicate needs a column that is not in the index, it cannot be checked at the seek. The plan then does the lookup first and evaluates the condition afterwards, either as a `WHERE:()` on the lookup or as a separate `Filter` operator above the join. All rows in the seek range are fetched before any are discarded.</Callout>
+
+## Reading the numbers
+
+Estimated plans carry per-operator estimates: `EstimateRows` (rows produced per execution), `EstimateIO` and `EstimateCPU`, and `TotalSubtreeCost`, the optimizer's unit-less cost of the operator and everything below it. The graphical plan shows the subtree cost as a percentage of the whole statement, which is useful for spotting the expensive operator but says nothing about absolute time.
+
+Actual plans add two columns per operator, visible in `STATISTICS PROFILE` output and in the Properties pane.
+
+```
+Rows  Executes  StmtText
+----  --------  ---------------------------------------------------------------
+33    1           |--Nested Loops(Inner Join, OUTER REFERENCES:(...))
+33    1                |--Index Seek(OBJECT:([dbo].[employees].[emp_sub_name]), SEEK:(...) ORDERED FORWARD)
+33    33               |--Clustered Index Seek(OBJECT:([dbo].[employees].[employees_pk]), SEEK:(...) LOOKUP ORDERED FORWARD)
+```
+
+`Rows` is the total number of rows the operator returned across all its executions; `Executes` is how often it ran. The lookup ran 33 times and returned one row each time. `EstimateRows`, by contrast, is per execution, so compare `Rows` with `EstimateRows` times `Executes`. A lookup that executes a hundred thousand times is the signature of a seek that returns far more rows than the optimizer estimated, or of a missing covering column.
+
+`SET STATISTICS IO ON` prints one line per table.
+
+```
+Table 'employees'. Scan count 1, logical reads 70, physical reads 0, ...
+```
+
+`logical reads` is the number of 8 KB pages touched in the buffer pool, physical or not. It is the steadiest measure of how much work a plan does, and it directly reflects filter predicates: the `LIKE` query above reads more index pages than the equality query although both return 33 rows. `SET STATISTICS TIME ON` adds CPU and elapsed milliseconds for parsing and for execution.
+
+The comparison to make first is estimated against actual rows on each operator. When the estimate is off by a factor of ten or more, the optimizer worked from stale statistics or an un-estimable predicate, and every decision above that operator is suspect. `UPDATE STATISTICS employees;` refreshes the statistics; a `LIKE` with a leading wildcard stays a guess regardless.

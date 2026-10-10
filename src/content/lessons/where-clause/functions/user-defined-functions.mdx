@@ -1,0 +1,106 @@
+---
+title: User-Defined Functions
+subtitle: An index stores the function's result when the row is written. That only works if the result can never change, which rules out anything that looks at the clock.
+chapter: where-clause
+order: 2.2
+kind: lesson
+minutes: 8
+summary: Why a function-based index can hold any deterministic expression, including your own functions, why an age calculation based on the current date can never be indexed, what the DETERMINISTIC and IMMUTABLE declarations promise, and how to still use an index for the age query.
+prereqs: "You should have read <a href='/sql/where-clause/functions/case-insensitive-search/'>Case-Insensitive Search</a> and know that a function-based index stores the result of an expression."
+outcomes:
+  - What kinds of expressions a function-based index can hold
+  - Why a function that reads the current date cannot be indexed
+  - What happens inside the index when a row is inserted, and what never happens afterwards
+  - What DETERMINISTIC and IMMUTABLE promise, and why the database takes your word for it
+  - How to use an index for the age query anyway
+recap:
+  - A function-based index can hold expressions such as A + B and calls to your own functions, as long as the function is deterministic.
+  - The database computes the expression when a row is written and never again. A result that depends on the clock, a random number or the environment goes stale in the index.
+  - Oracle and PostgreSQL require DETERMINISTIC or IMMUTABLE and trust the declaration. Lying makes the index wrong, not the function right.
+  - Db2 for LUW does not allow user-defined functions in an index at all.
+  - Move the computation to the other side of the comparison. An age becomes a date range on date_of_birth, which a plain index serves.
+source: https://use-the-index-luke.com/sql/where-clause/functions/user-defined-functions
+---
+import { Callout, KeyIdea, Check, TryIt } from '@/components/mdx';
+
+Function-based indexing is a general mechanism. `UPPER` was only the first example. You can index an arithmetic expression such as `A + B`, and you can index a call to a function you wrote yourself. There is one restriction, and it follows directly from how the index is built.
+
+## 1. The function that reads the clock
+
+The restriction is this: an index definition cannot depend on the current time, neither directly nor through a function that does. Here is a function that does.
+
+```sql
+CREATE FUNCTION get_age(date_of_birth DATE)
+RETURN NUMBER
+AS
+BEGIN
+  RETURN
+    TRUNC(MONTHS_BETWEEN(SYSDATE, date_of_birth)/12);
+END
+```
+
+`GET_AGE` takes a date of birth and works out the age from today's date, `SYSDATE`. It can be used anywhere in a query, in the select list and in the where clause alike.
+
+```sql
+SELECT first_name, last_name, get_age(date_of_birth)
+  FROM employees
+ WHERE get_age(date_of_birth) = 42
+```
+
+The query lists every employee who is 42. A function-based index on `get_age(date_of_birth)` is the obvious way to speed it up, and it cannot be built, because `GET_AGE` is not **deterministic**. Its result is not fully determined by its argument; the same date of birth produces a different age next year. An index can only hold a function whose output is fixed by its input: same argument, same result, forever.
+
+## 2. Why: the result is stored once
+
+The reason is in the mechanics. When a row is inserted, the database calls the function, writes the result into the index, and that is the end of it. Nothing revisits the index entry later. There is no background job that recomputes indexed expressions. The entry changes only when the underlying column changes, that is, when an `UPDATE` sets a new `date_of_birth`. So the age stored in the index is correct on the day of the insert and wrong after the employee's next birthday.
+
+<KeyIdea>An index entry is computed when the row is written and read back as the truth ever after. That is only safe when the computation cannot change its mind.</KeyIdea>
+
+## 3. Declaring determinism
+
+Being deterministic is not enough for Oracle and PostgreSQL; the function also has to say so. Oracle wants the keyword `DETERMINISTIC`, PostgreSQL wants `IMMUTABLE`, and without it `CREATE INDEX` refuses the function.
+
+<Callout kind="warning" title="Caution">Both databases trust the declaration. They do not inspect the function body; they take the developer's word for it.</Callout>
+
+That means you can declare `GET_AGE` deterministic and the index will be created. It still will not do what you want. The ages in the index stay as they were on the day each row was inserted, so in the index nobody ever gets older. The declaration switched off a safety check; it did not change what the function computes.
+
+Other functions that cannot be indexed for the same reason: random number generators, and anything whose result depends on environment variables or session settings.
+
+<Callout kind="note">Db2 for LUW does not allow user-defined functions in an index definition at all, deterministic or not.</Callout>
+
+## 4. Think about it
+
+How can an index still help the query for all 42-year-old employees?
+
+The answer is to move the arithmetic to the other side of the comparison. "Age is 42" is the same question as "date of birth lies in a particular one-year window", and that window can be computed from today's date before the scan starts. The column stays bare, the function-free condition becomes a range on `date_of_birth`, and an ordinary index on that column does the work. The [range lesson](/sql/where-clause/searching-for-ranges/) covers what a range scan costs; here the range is narrow and the index is cheap.
+
+## 5. Try it
+
+The playground has an index on `date_of_birth`. SQLite also refuses to index a non-deterministic expression: a `CREATE INDEX` on the age calculation fails with `non-deterministic use of julianday() in an index`, which is the same rule Oracle and PostgreSQL enforce through the declaration.
+
+<TryIt id="2.5" setup={`CREATE INDEX emp_dob ON employees (date_of_birth);`} tasks={[
+  { text: 'Run the age query as it is. The age is computed from <code>julianday(\'now\')</code>, and the plan says <code>SCAN employees</code>.', sql: 'julianday\\s*\\(\\s*\'now\'\\s*\\)', plan: '^SCAN employees' },
+  { text: 'Rewrite the condition as a range on the bare <code>date_of_birth</code>, from 43 years ago (exclusive) to 42 years ago (inclusive). The plan becomes <code>SEARCH employees USING INDEX emp_dob (date_of_birth&gt;? AND date_of_birth&lt;?)</code>.', sql: 'date_of_birth\\s*>[\\s\\S]*date_of_birth\\s*<=', plan: 'USING INDEX emp_dob \\(date_of_birth>\\? AND date_of_birth<\\?\\)' },
+]} sql={`SELECT first_name, last_name, date_of_birth
+  FROM employees
+ WHERE CAST((julianday('now') - julianday(date_of_birth)) / 365.25 AS INTEGER) = 42;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 2</summary><div class="d">Someone is 42 today if their 42nd birthday has passed and their 43rd has not. SQLite's <code>date('now', '-42 years')</code> gives the later boundary.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT first&#95;name, last&#95;name, date&#95;of&#95;birth
+  FROM employees
+ WHERE date&#95;of&#95;birth &gt;  date('now', '-43 years')
+   AND date&#95;of&#95;birth &lt;= date('now', '-42 years');
+-- plan: SEARCH employees USING INDEX emp&#95;dob (date&#95;of&#95;birth&gt;? AND date&#95;of&#95;birth&lt;?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="Why can an index on get_age(date_of_birth) not work, even if the database lets you create it?"
+  options={[
+    'Because user-defined functions are slower than built-in functions.',
+    'Because the stored result goes stale: the age changes with the calendar while the index entry does not.',
+    'Because an index can only hold one column, and the function reads two values.',
+  ]}
+  answer={1}
+  explain="The index stores the function result when the row is written. An age depends on the current date, so the stored value is wrong as soon as the employee has a birthday. Only a function whose output depends solely on its arguments can be indexed safely. Rewrite the condition as a range on date_of_birth instead."
+/>

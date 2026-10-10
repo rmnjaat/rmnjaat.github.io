@@ -1,0 +1,130 @@
+---
+title: Over-Indexing
+subtitle: Every function-based index is a whole extra B-tree. Before adding one, check whether an existing index could do the job if the queries agreed on one expression.
+chapter: where-clause
+order: 2.3
+kind: lesson
+minutes: 6
+summary: Why indexing every expression is the wrong reflex, how UPPER and LOWER turn one case-insensitive search into two indexes, why one consistent access path lets one index serve many queries, and why the original data is usually the best thing to index.
+prereqs: "You should have read <a href='/sql/where-clause/functions/case-insensitive-search/'>Case-Insensitive Search</a> and know that a function-based index serves only the expression it was built on."
+outcomes:
+  - Why function-based indexes make redundant indexes easy to create
+  - Why an index on UPPER(last_name) is useless for a LOWER(last_name) search
+  - What every extra index costs on insert, update and delete
+  - How unifying the access path lets one index serve several queries
+  - Why indexing the original column is usually the better default
+recap:
+  - Every index costs ongoing maintenance. Indexing every expression in sight is the wrong reflex, and function-based indexes make that mistake easy.
+  - A search written with LOWER cannot use an index built on UPPER. Two spellings of the same question need two indexes.
+  - Use the same function consistently throughout the application so that one index serves every query. Watch out for ORMs that inject their own.
+  - Aim to index the original data. It is usually the most useful information an index can hold.
+source: https://use-the-index-luke.com/sql/where-clause/functions/over-indexing
+---
+import { Callout, KeyIdea, EngineTabs, Check, TryIt } from '@/components/mdx';
+
+Once you know that any expression can be indexed, it is tempting to index all of them. Do not. Every index you add is a tree the database has to keep in step with the table, for as long as it exists, and function-based indexes are especially prone to one problem: they make it very easy to create two indexes that store the same information.
+
+## 1. UPPER or LOWER, not both
+
+The case-insensitive search from the previous lesson can just as well be written with `LOWER`.
+
+```sql
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE LOWER(last_name) = LOWER('winand')
+```
+
+Same question, same result, different expression. One index cannot serve both spellings: the index on `UPPER(last_name)` holds names in capitals and knows nothing about `LOWER(last_name)`. We could create a second index on `LOWER(last_name)`, but then every `INSERT`, `UPDATE` and `DELETE` on `employees` maintains two B-trees for what is, to the application, one search. [Unit 8](/sql/dml/) measures that cost. The way to get by with one index is to pick one function and use it everywhere.
+
+<KeyIdea>Unify the access path. When every query spells the condition the same way, one index serves them all.</KeyIdea>
+
+<Callout kind="warning" title="Common mistake">Assuming you know which function your queries use. ORM tools sometimes add `UPPER` or `LOWER` on their own; Hibernate, for instance, injects an [implicit `LOWER`](/sql/myth-directory/dynamic-sql-is-slow/) into case-insensitive searches. If your hand-written SQL says `UPPER` and the ORM says `LOWER`, you are already maintaining two indexes or missing one.</Callout>
+
+## 2. Index the original data
+
+Before indexing an expression, ask whether the plain column would do. An index on the original data is usually the most useful one, because it serves exact lookups, ranges and sorting on that column, not just one function of it. A function-based index is the right tool when the application genuinely has to search the transformed value and cannot be changed to search the raw one.
+
+<Callout kind="tip" title="Also redundant: a prefix of a concatenated index">An index on `(subsidiary_id)` next to an index on `(subsidiary_id, last_name)` is the same mistake without a function. The second index serves every query the first one does, because `subsidiary_id` is its leading column.</Callout>
+
+## 3. Finding what is unused
+
+Guessing which indexes earn their keep is as unreliable as guessing whether a query uses an index. Every database keeps counters.
+
+<EngineTabs>
+  <Fragment slot="postgresql">
+  ```sql
+  SELECT indexrelname, idx_scan
+    FROM pg_stat_user_indexes
+   WHERE relname = 'employees';
+  ```
+
+  `idx_scan` counts how often each index has been scanned since the statistics were last reset. An index that stays at zero through a representative period of production use is a candidate for dropping; a primary key or unique index stays regardless, because it enforces a constraint.
+  </Fragment>
+  <Fragment slot="mysql">
+  ```sql
+  SELECT * FROM sys.schema_unused_indexes
+   WHERE object_name = 'employees';
+  ```
+
+  The `sys` schema view is built on `performance_schema` counters, which reset when the server restarts, so give it time before trusting an empty result.
+  </Fragment>
+  <Fragment slot="oracle">
+  ```sql
+  SELECT name, total_access_count, last_used
+    FROM dba_index_usage
+   WHERE owner = USER AND name LIKE 'EMP%';
+  ```
+
+  `DBA_INDEX_USAGE` is available from Oracle 12.2 and is sampled, so low counts are approximate. Older releases need `ALTER INDEX ... MONITORING USAGE` and `V$OBJECT_USAGE`.
+  </Fragment>
+  <Fragment slot="sql-server">
+  ```sql
+  SELECT i.name, s.user_seeks, s.user_scans, s.user_lookups, s.user_updates
+    FROM sys.indexes i
+    LEFT JOIN sys.dm_db_index_usage_stats s
+      ON s.object_id = i.object_id AND s.index_id = i.index_id
+   WHERE i.object_id = OBJECT_ID('employees');
+  ```
+
+  Zero seeks and scans next to a large `user_updates` is the signature of an index that only costs. The counters reset on restart.
+  </Fragment>
+  <Fragment slot="db2">
+  ```sql
+  SELECT indname, lastused
+    FROM syscat.indexes
+   WHERE tabname = 'EMPLOYEES';
+  ```
+
+  `LASTUSED` records the last day the index was used by a statement. `MON_GET_INDEX` gives finer-grained counters for the current activation of the database.
+  </Fragment>
+</EngineTabs>
+
+## 4. Try it
+
+The playground has an index on `UPPER(last_name)` and nothing else beyond the primary key.
+
+<TryIt id="2.6" setup={`CREATE INDEX emp_up_name ON employees (UPPER(last_name));`} tasks={[
+  { text: 'Run the <code>LOWER</code> version of the search. The plan says <code>SCAN employees</code>: the <code>UPPER</code> index is of no use.', sql: 'lower\\s*\\(\\s*last_name\\s*\\)\\s*=', plan: '^SCAN employees' },
+  { text: 'Change both sides to <code>UPPER</code> and run it again. Same result set, but now <code>SEARCH employees USING INDEX emp_up_name</code>.', sql: 'upper\\s*\\(\\s*last_name\\s*\\)\\s*=', plan: 'USING INDEX emp_up_name' },
+]} sql={`SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE LOWER(last_name) = LOWER('winand');`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT first&#95;name, last&#95;name, phone&#95;number
+  FROM employees
+ WHERE UPPER(last&#95;name) = UPPER('winand');
+-- plan: SEARCH employees USING INDEX emp&#95;up&#95;name (&lt;expr&gt;=?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="employees has an index on UPPER(last_name). A new report searches with LOWER(last_name). What is the best response?"
+  options={[
+    'Add an index on LOWER(last_name). Two indexes give the optimizer more choice.',
+    'Change the report to use UPPER(last_name), so the existing index serves it too.',
+    'Drop the UPPER index and rely on the full table scan; function-based indexes are expensive to maintain.',
+  ]}
+  answer={1}
+  explain="Both spellings ask the same question. A second index would store the same information in a second B-tree and be maintained on every write. Unifying the access path lets the existing index serve the new query at no extra cost. A function-based index costs little more to maintain than any other, so dropping it is no answer either."
+/>

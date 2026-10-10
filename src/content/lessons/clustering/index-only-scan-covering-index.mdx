@@ -1,0 +1,275 @@
+---
+title: Index-Only Scan
+subtitle: If the index holds every column the query touches, the table is never read. That is the fastest an index gets, the easiest thing to break with one extra column, and the reason to avoid SELECT *.
+chapter: clustering
+order: 2
+kind: lesson
+minutes: 12
+summary: "Covering indexes and the index-only scan: when the database answers a query from the index alone, how much it saves and when it saves little, how an extra where or select column silently brings the table back, why function-based indexes cannot cover the original column, INCLUDE columns, and the per-engine limits on index width."
+prereqs: "You should have read <a href='/sql/clustering/index-filter-predicates/'>Index filter predicates used intentionally</a> and know what the clustering factor measures."
+outcomes:
+  - When a query can be answered from the index alone, and why the where clause still decides the column order
+  - Why the gain depends on the number of rows and the clustering factor, and why it is small for a single row
+  - How adding a column to the where clause or the select list silently brings the table access back, and what the optimizer does then
+  - Why an index on UPPER(last_name) cannot cover last_name, and what INCLUDE columns are for
+  - What limits each engine puts on the number and size of index columns
+recap:
+  - An index-only scan happens when the index contains every column the statement references, select list included. The index that allows it is called a covering index, but covering is a property of the plan, not the index.
+  - The saving is one table access per row, so it is big for queries that touch many rows and small for a single row or a well-clustered index. Index the where clause first and extend only when the plan needs it.
+  - Any column that is not in the index, in the where clause or the select list, brings the table access back. A new where column may at least open a new access path; a new select column never does. Avoid SELECT * and comment your index-only scans.
+  - Index the original column rather than a function of it. Use INCLUDE for payload columns where the engine supports it, and mind the per-engine limits on index width.
+source: https://use-the-index-luke.com/sql/clustering/index-only-scan-covering-index
+---
+import { Callout, KeyIdea, Check, TryIt, EngineTabs } from '@/components/mdx';
+
+The previous lesson cut the number of table reads by filtering in the index. Take that to its end: if the index holds everything the query needs, there is no reason to read the table at all. This is one of the most powerful tuning techniques there is, and one of the most fragile.
+
+## 1. A query the index can answer alone
+
+To cover a query, the index must contain every column the statement mentions, in particular the ones in the select list:
+
+```sql
+CREATE INDEX sales_sub_eur
+    ON sales
+     ( subsidiary_id, eur_value )
+```
+
+```sql
+SELECT SUM(eur_value)
+  FROM sales
+ WHERE subsidiary_id = ?
+```
+
+The where clause still comes first when choosing the column order: `subsidiary_id` leads so that it works as an access predicate. `eur_value` is there only so that the database finds the value to sum in the index entry. The plan shows the index scan with no table access after it.
+
+<EngineTabs>
+  <Fragment slot="oracle">
+  ```
+  ----------------------------------------------------------
+  | Id  | Operation         | Name          |  Rows | Cost |
+  ----------------------------------------------------------
+  |   0 | SELECT STATEMENT  |               |     1 |  104 |
+  |   1 |  SORT AGGREGATE   |               |     1 |      |
+  |*  2 |   INDEX RANGE SCAN| SALES_SUB_EUR | 40388 |  104 |
+  ----------------------------------------------------------
+
+  Predicate Information (identified by operation id):
+  ---------------------------------------------------
+     2 - access("SUBSIDIARY_ID"=TO_NUMBER(:A))
+  ```
+  The sign of an index-only scan is what is missing: no `TABLE ACCESS BY INDEX ROWID` above the `INDEX RANGE SCAN`. When Oracle reads an index front to back instead of by range, the operation is `INDEX FAST FULL SCAN`.
+  </Fragment>
+  <Fragment slot="db2">
+  ```
+  Explain Plan
+  ---------------------------------------------------------------
+  ID | Operation              |                       Rows | Cost
+   1 | RETURN                 |                            |   21
+   2 |  GRPBY (COMPLETE)      |       1 of 34804 (   .00%) |   21
+   3 |   IXSCAN SALES_SUB_EUR | 34804 of 1009326 (  3.45%) |   19
+
+  Predicate Information
+   3 - START (Q1.SUBSIDIARY_ID = ?)
+        STOP (Q1.SUBSIDIARY_ID = ?)
+  ```
+  `IXSCAN` feeds `GRPBY` directly, with no `FETCH` in between.
+  </Fragment>
+  <Fragment slot="postgresql">
+  ```
+  Aggregate  (cost=315.40..315.41 rows=1 width=8)
+    ->  Index Only Scan using sales_sub_eur on sales  (cost=0.29..290.40 rows=10000 width=8)
+          Index Cond: (subsidiary_id = $1)
+          Heap Fetches: 0
+  ```
+  PostgreSQL has index-only scans since release 9.2. `Index Only Scan` is the operation to look for, and `Heap Fetches` (from `EXPLAIN ANALYZE`) is the catch. The index does not store whether a row version is visible to your transaction; the table does. The planner consults the visibility map, which marks blocks whose rows are visible to everyone, and for blocks not marked the scan has to read the table after all. After a burst of inserts or updates the number rises; `VACUUM` brings it down.
+  </Fragment>
+  <Fragment slot="sql-server">
+  ```
+  |--Stream Aggregate(DEFINE:([Expr1003]=SUM([sales].[eur_value])))
+       |--Index Seek(OBJECT:([sales].[sales_sub_eur]), SEEK:([subsidiary_id]=@1) ORDERED FORWARD)
+  ```
+  An `Index Seek` with no `Key Lookup` or `RID Lookup` joined to it is an index-only scan.
+  </Fragment>
+  <Fragment slot="mysql">
+  ```
+             id: 1
+    select_type: SIMPLE
+          table: sales
+           type: ref
+  possible_keys: sales_sub_eur
+            key: sales_sub_eur
+            ref: const
+           rows: 40388
+          Extra: Using index
+  ```
+  `Using index` in `Extra` is the index-only scan. Every InnoDB secondary index also carries the primary key columns, so selecting `sale_id` as well would still stay in the index; the next lesson explains why.
+  </Fragment>
+</EngineTabs>
+
+An index that makes this possible is called a **covering index**. The name is slightly off, since it makes covering sound like a fixed attribute of the index. Whether an index covers is decided per query: the same index covers `SUM(eur_value)` and does not cover `SUM(quantity)`. "Index-only scan" says it better, because it names the operation.
+
+## 2. How much it saves
+
+The Oracle and MySQL plans estimate about 40,000 entries, at the book's data volume of a million sales; in the playground the same subsidiary has 10,000. Either way, without the covering column each of those entries would cost a table read, one per row when every row sits in its own block. Where the index has a good clustering factor and the rows share a few blocks, there is less to save.
+
+The number of rows limits the gain in the other direction too. A query that returns one row saves one table access, and since the tree traversal itself costs a few block reads, that one saved read hardly registers.
+
+<Callout kind="important">Two numbers decide what an index-only scan is worth: how many rows the query touches, and how scattered those rows are, which is the clustering factor.</Callout>
+
+That makes it an aggressive strategy. Do not build covering indexes on suspicion: they use memory and make every `UPDATE` of the covered column slower ([Unit 8](/sql/dml/)). Index for the where clause first, without looking at the select list, and extend the index only when a plan shows the need.
+
+## 3. How it breaks
+
+Suppose the report is narrowed to recent sales:
+
+```sql
+SELECT SUM(eur_value)
+  FROM sales
+ WHERE subsidiary_id = ?
+   AND sale_date > ?
+```
+
+Fewer rows, so one would expect it to run faster. But `sale_date` is not in the index, and the database has to read the table to evaluate the new condition.
+
+<EngineTabs>
+  <Fragment slot="oracle">
+  ```
+  --------------------------------------------------------------
+  |Id | Operation                    | Name      | Rows  |Cost |
+  --------------------------------------------------------------
+  | 0 | SELECT STATEMENT             |           |     1 | 371 |
+  | 1 |  SORT AGGREGATE              |           |     1 |     |
+  |*2 |   TABLE ACCESS BY INDEX ROWID| SALES     |  2019 | 371 |
+  |*3 |    INDEX RANGE SCAN          | SALES_DATE| 10541 |  30 |
+  --------------------------------------------------------------
+
+  Predicate Information (identified by operation id):
+  ---------------------------------------------------
+     2 - filter("SUBSIDIARY_ID"=TO_NUMBER(:A))
+     3 - access("SALE_DATE">:B)
+  ```
+  The cost rose from 104 to 371, and the optimizer switched to a different index entirely.
+  </Fragment>
+  <Fragment slot="db2">
+  ```
+  Explain Plan
+  -------------------------------------------------------------------
+  ID | Operation                 |                       Rows |  Cost
+   1 | RETURN                    |                            | 13547
+   2 |  GRPBY (COMPLETE)         |        1 of 1223 (   .08%) | 13547
+   3 |   FETCH SALES             |    1223 of 34804 (  3.51%) | 13547
+   4 |    RIDSCN                 |   34804 of 34804 (100.00%) |    32
+   5 |     SORT (UNIQUE)         |   34804 of 34804 (100.00%) |    32
+   6 |      IXSCAN SALES_SUB_EUR | 34804 of 1009326 (  3.45%) |    19
+
+  Predicate Information
+   3 - SARG (? < Q1.SALE_DATE)
+       SARG (Q1.SUBSIDIARY_ID = ?)
+   6 - START (Q1.SUBSIDIARY_ID = ?)
+        STOP (Q1.SUBSIDIARY_ID = ?)
+  ```
+  Db2 keeps the same index but adds a `FETCH` of all 34,804 rows to check the date. The cost goes from 21 to 13,547.
+  </Fragment>
+</EngineTabs>
+
+The query delivers fewer rows and takes longer. The number of rows a query returns says little about its cost; the number of rows the database has to look at on the way is what sets it.
+
+<Callout kind="warning" title="Check the plan before extending a query">Adding a condition to the where clause can make a query slower, which looks illogical until you see the table access come back. Read the plan before and after.</Callout>
+
+When the covering index no longer covers, the optimizer takes the next best plan, which may be something completely different or, as in the Oracle plan, a similar plan on another index. Here it chose `sales_date`, a leftover from the [hash join lesson](/sql/join/hash-join-partial-objects/), for two reasons. First, it believes the date condition is more selective than the subsidiary (about 10,000 rows against 40,000 in the two plans), although with bind parameters that estimate is arbitrary: the date of the first sale would select the whole table. Second, `sales_date` has a better clustering factor. `sales` grows chronologically and, as long as nothing is deleted, new rows are appended at the end, so the table order roughly follows the date order.
+
+An index with a good clustering factor finds its rows in few table blocks, and the query may be fast enough through `sales_date` without any index-only scan. In that case the extra column in `sales_sub_eur` should go again.
+
+<Callout kind="note">An index whose order already follows the table, as a date index on an append-only table does, gains little from an index-only scan.</Callout>
+
+This example was a lucky one: the extra condition cost the index-only scan but handed the optimizer another access path in return, so it could limit the damage. A column added to the select list never opens a new access path. It only costs.
+
+<KeyIdea title="Maintain your index-only scans">Put a comment next to a query that depends on an index-only scan, saying so and pointing here, so that whoever adds a column next year knows what they are about to break.</KeyIdea>
+
+## 4. Function-based indexes and the original column
+
+Function-based indexes cause a similar surprise. An index on `UPPER(last_name)` stores the uppercase string, not the column, so it cannot cover a query that selects `last_name`. That is the reason the previous lesson hinted at: the index for the `LIKE` filter would have been more useful on `last_name` itself, because then it also covers queries that select the name.
+
+<KeyIdea>Prefer the column itself over an expression on it. An index on the raw value serves more queries, and a function-based index only earns its place when the expression is an access predicate.</KeyIdea>
+
+## 5. Which queries to cover, and what it costs
+
+Aggregates like the sum above are the ideal case: many rows, few columns, so a slim index covers them. The more columns a query selects, the more the index has to carry, and at some point the index is a second copy of the table. Select only the columns you need. `SELECT *`, the default of every ORM that maps whole entities, rules out an index-only scan on any table with more columns than you would put in an index.
+
+Width is also limited by the engine. Every database caps the number of columns per index and the size of an index entry.
+
+<Callout kind="note" title="INCLUDE: non-key columns">
+
+SQL Server and PostgreSQL 11 and later can add **non-key columns** to a B-tree index. They are stored in the leaf nodes only, not in the branch nodes, so they cannot be access predicates, but they keep the tree narrow and they cover the select list:
+
+```sql
+ CREATE INDEX empsubupnam
+     ON employees
+       (subsidiary_id, last_name)
+INCLUDE(phone_number, first_name)
+```
+
+</Callout>
+
+<EngineTabs>
+  <Fragment slot="db2">
+  Db2 (LUW) allows 64 columns per index, with a key length of at most a quarter of the page size. It also supports `INCLUDE`, on unique indexes only: the extra columns make the index cover more queries without changing what is unique.
+  </Fragment>
+  <Fragment slot="mysql">
+  InnoDB caps an index key at 3072 bytes with the `DYNAMIC` or `COMPRESSED` row format, which has been the default since 5.7.9, and at 767 bytes with the older `REDUNDANT` and `COMPACT` formats. The `innodb_large_prefix` switch that used to govern this is gone in 8.0. MyISAM allows 16 columns and 1000 bytes.
+
+  MySQL also has **prefix indexing**, which indexes only the first characters of a column and is unrelated to the partial indexes of [Unit 2](/sql/where-clause/partial-and-filtered-indexes/). If a column is longer than the key limit allows, MySQL in strict SQL mode, the default since 5.7, refuses the index with error 1071, "Specified key was too long; max key length is … bytes". Only with strict mode off does it shorten the key to a prefix on its own and merely warn. A prefix index holds the first characters of the column, not a copy of it, so selecting that column prevents an index-only scan, just as with a function-based index. The prefix can also be asked for explicitly to stay under the key limit:
+
+  ```sql
+  CREATE INDEX .. ON employees (last_name(10))
+  ```
+  </Fragment>
+  <Fragment slot="oracle">
+  A B-tree index holds at most 32 columns. The longest key an entry can hold follows from the block size and the storage parameters of the index, about three quarters of a block once the overhead is taken off. With 8 KB blocks and default storage that is 6398 bytes, unchanged from 11g through 23ai, and a longer key fails with "ORA-01450: maximum key length (6398) exceeded".
+  </Fragment>
+  <Fragment slot="postgresql">
+  A B-tree entry may not exceed 2704 bytes in PostgreSQL 12 and later (2712 before), a hard-coded limit of roughly a third of the page. Nothing complains at `CREATE INDEX` time; the error "index row size N exceeds btree version 4 maximum 2704 for index …" only shows up when an insert or update actually produces an entry that long. An index can have up to 32 columns. Index-only scans exist since 9.2, `INCLUDE` since 11.
+  </Fragment>
+  <Fragment slot="sql-server">
+  Since SQL Server 2016, up to 32 key columns and 1700 bytes per key (900 bytes for a clustered index); before 2016 it was 16 columns and 900 bytes. Non-key `INCLUDE` columns do not count against the limit.
+  </Fragment>
+</EngineTabs>
+
+<Callout kind="tip" title="Think about it">A query whose select list needs nothing from the table is a natural index-only scan. Can you name one that is useful? One answer: the subquery of an `EXISTS` or `IN`, which only needs to know whether a row is there. `COUNT(*)` with an indexed where clause is another.</Callout>
+
+The next lesson goes one step further, to indexes that contain the whole table.
+
+## 6. See the table disappear
+
+The playground creates `sales_sub_eur` on `(subsidiary_id, eur_value)`. SQLite reports an index-only scan as `USING COVERING INDEX`. Subsidiary 20 has ten thousand sales.
+
+<TryIt id="5.2" setup={`CREATE INDEX sales_sub_eur ON sales (subsidiary_id, eur_value);`} tasks={[
+  { text: 'Run the query. The plan says <code>SEARCH sales USING COVERING INDEX sales_sub_eur</code>: ten thousand entries summed without one table read.', sql: 'sum\\(\\s*eur_value\\s*\\)', plan: 'COVERING INDEX sales_sub_eur' },
+  { text: 'Add <code>AND sale_date > \'2025-06-01\'</code> to the where clause. Fewer rows, but <code>COVERING</code> is gone: the table is read for all ten thousand entries to check the date.', sql: 'sale_date\\s*>', plan: 'USING INDEX sales_sub_eur' },
+  { text: 'Now run <code>SELECT * FROM sales WHERE subsidiary_id = 20</code>. A perfect access predicate, and still no <code>COVERING</code>, because the select list needs every column.', sql: 'select\\s+\\*', plan: 'USING INDEX sales_sub_eur' },
+]} sql={`SELECT SUM(eur_value)
+  FROM sales
+ WHERE subsidiary_id = 20;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 2</summary><div class="d"><code>sale_date</code> is not in the index. SQLite keeps using <code>sales_sub_eur</code> for the subsidiary and fetches each row to test the date, which is what <code>USING INDEX</code> without <code>COVERING</code> means.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT SUM(eur&#95;value)
+  FROM sales
+ WHERE subsidiary&#95;id = 20
+   AND sale&#95;date &gt; '2025-06-01';
+-- plan: SEARCH sales USING INDEX sales&#95;sub&#95;eur (subsidiary&#95;id=?)
+SELECT &#42; FROM sales WHERE subsidiary&#95;id = 20;
+-- plan: SEARCH sales USING INDEX sales&#95;sub&#95;eur (subsidiary&#95;id=?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="The index is sales (subsidiary_id, eur_value). Which query runs as an index-only scan?"
+  options={[
+    'SELECT eur_value FROM sales WHERE subsidiary_id = 20',
+    'SELECT eur_value, sale_date FROM sales WHERE subsidiary_id = 20',
+    'SELECT * FROM sales WHERE subsidiary_id = 20 AND eur_value > 500',
+  ]}
+  answer={0}
+  explain="Only the first query references nothing but indexed columns. The second needs sale_date, which is not in the index. The third has a perfectly good access predicate, but SELECT * needs every column of the table, so the table has to be read for each row."
+/>

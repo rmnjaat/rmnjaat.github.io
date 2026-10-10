@@ -1,0 +1,138 @@
+---
+title: Combining Columns
+subtitle: A range over a combination of columns cannot use an index on the parts. A redundant condition on the leading column gives the optimizer an access predicate, and the same trick can be turned around to switch an index off on purpose.
+chapter: where-clause
+order: 7.3
+kind: lesson
+minutes: 8
+summary: Why a condition on ADDTIME(date_column, time_column) or on a concatenated string cannot use a concatenated index on the columns, the three ways out (a combined column type, a function-based index, a redundant condition on the most significant column), the row-values alternative in PostgreSQL, and how to obfuscate a LIKE condition deliberately.
+prereqs: "You should have read <a href='/sql/where-clause/the-equals-operator/concatenated-keys/'>Concatenated Keys</a> and <a href='/sql/where-clause/obfuscation/dates/'>Date Types</a>."
+outcomes:
+  - Why a range over a date and a time column defeats an index on both
+  - When changing the column type or adding a function-based index is the answer
+  - How a redundant condition on the leading column restores an access predicate
+  - How the same approximation applies to date and time kept as text
+  - When and how to obfuscate a condition on purpose
+recap:
+  - A condition on a value derived from several columns is not a condition on any of them; a concatenated index on the columns cannot serve it.
+  - A combined data type such as DATETIME avoids the problem; a function-based index works where supported, with its usual drawbacks.
+  - Add a plain condition on the leading column that the original implies. The index uses it as an access predicate, and the extra rows it reads are few.
+  - In PostgreSQL, row values are the cleaner way to write a range over several columns.
+  - Appending an empty string to a column hides it from the optimizer deliberately. Use it for a LIKE with a known leading wildcard, and only as a last resort.
+source: https://use-the-index-luke.com/sql/where-clause/obfuscation/concatenation
+---
+import { Callout, KeyIdea, Check, TryIt } from '@/components/mdx';
+
+This lesson is about a popular obfuscation that defeats [concatenated indexes](/sql/where-clause/the-equals-operator/concatenated-keys/). It starts with [date and time](/sql/where-clause/obfuscation/dates/) again, but the other way round: instead of taking a date apart, the query glues two columns together.
+
+## 1. A range over two columns
+
+A MySQL table keeps the date and the time of day in separate columns. A query for the last 24 hours combines them:
+
+```sql
+SELECT ...
+  FROM ...
+ WHERE ADDTIME(date_column, time_column)
+     > DATE_ADD(now(), INTERVAL -1 DAY)
+```
+
+The query is correct, and it cannot properly use a concatenated index on `(DATE_COLUMN, TIME_COLUMN)`. The search is not on the indexed columns but on a value derived from them, and that value is in no index.
+
+## 2. Change the type, or index the expression
+
+The cleanest fix is a column type that holds both parts, such as MySQL's `DATETIME`. Then the column stands alone in the condition:
+
+```sql
+SELECT ...
+  FROM ...
+ WHERE datetime_column
+     > DATE_ADD(now(), INTERVAL -1 DAY)
+```
+
+Changing the table is often not an option when the problem turns up. The next candidate is a [function-based index](/sql/where-clause/functions/) on the combined expression, with all the drawbacks [discussed before](/sql/where-clause/functions/over-indexing/), and not available at all in older MySQL versions.
+
+## 3. The redundant condition
+
+There is a third way that lets the concatenated index on `DATE_COLUMN, TIME_COLUMN` provide an access predicate, at least in part. Add an extra condition on `DATE_COLUMN` alone:
+
+```sql
+WHERE ADDTIME(date_column, time_column)
+    > DATE_ADD(now(), INTERVAL -1 DAY)
+  AND date_column
+   >= DATE(DATE_ADD(now(), INTERVAL -1 DAY))
+```
+
+The new condition is completely redundant: any row that passes the first one passes the second. But it is a straight comparison on `DATE_COLUMN`, so the index can use it as an access predicate. The scan starts at yesterday's date and the original condition filters out the rows from before the exact moment. The scan still reads yesterday's rows from before the exact cut-off and discards them, so it is an approximation, but a close one: a few extra rows from one day instead of the whole table.
+
+<KeyIdea title="Tip">When the condition glues columns together, add a plain condition on the leading column that the original already implies.</KeyIdea>
+
+For PostgreSQL, the row values syntax is preferable: `(date_column, time_column) > (?, ?)` compares the pair as a whole and uses the concatenated index directly.
+
+The same technique works when date and time are stored as text, provided the format sorts chronologically, as [ISO 8601](https://en.wikipedia.org/wiki/ISO_8601) does (`YYYY-MM-DD HH:MM:SS`). This Oracle example builds the comparison values with `TO_CHAR`:
+
+```sql
+SELECT ...
+  FROM ...
+ WHERE date_string || time_string
+     > TO_CHAR(sysdate - 1, 'YYYY-MM-DD HH24:MI:SS')
+   AND date_string
+    >= TO_CHAR(sysdate - 1, 'YYYY-MM-DD')
+```
+
+A range condition over several columns comes back in [Paging Through Results](/sql/partial-results/fetch-next-page/), and the same approximation is used there to deal with it.
+
+<Callout kind="warning" title="Common mistake">Adding a condition that is not implied by the original. The extra condition must be true for every row the original condition accepts, or it is not redundant, it is a bug. Derive the bound from the original condition, and leave a comment that says why it is there.</Callout>
+
+## 4. Obfuscating on purpose
+
+Sometimes the aim is the reverse: a condition that the optimizer should *not* use as an access predicate. The [bind parameter](/sql/where-clause/bind-parameters/) problem with `LIKE` is the classic case:
+
+```sql
+SELECT last_name, first_name, employee_id
+  FROM employees
+ WHERE subsidiary_id = ?
+   AND last_name LIKE ?
+```
+
+With one index on `SUBSIDIARY_ID` and another on `LAST_NAME`, which should the database use? Without knowing where the wildcard sits, there is no sound answer, and the optimizer can only guess. If you know the search term always starts with a wildcard, obfuscate the `LIKE` so that the index on `LAST_NAME` is no longer a candidate:
+
+```sql
+SELECT last_name, first_name, employee_id
+  FROM employees
+ WHERE subsidiary_id = ?
+   AND last_name || '' LIKE ?
+```
+
+Appending an empty string is all it takes. This is a last resort. Do it only when nothing else works.
+
+## 5. Try it
+
+The `sales` table keeps `sale_date` as an ISO string. The playground indexes it and runs a query that appends a fixed time of day before comparing, which is the text-column variant from section 3.
+
+<TryIt id="2.7.3" tasks={[
+  { text: 'Run the query. The concatenation hides <code>sale_date</code>; the plan is <code>SCAN sales</code>.', sql: "sale_date\\s*\\|\\|\\s*' 12:00'", plan: '^SCAN sales' },
+  { text: 'Add the redundant condition <code>AND sale_date &gt;= \'2024-06-15\'</code>. The plan now uses <code>sales_date</code> with an access predicate, and the original condition does the filtering.', sql: "sale_date\\s*\\|\\|[\\s\\S]*and\\s+sale_date\\s*>=\\s*'2024-06-15'", plan: 'USING INDEX sales_date \\(sale_date>\\?\\)' },
+]} setup={`CREATE INDEX sales_date ON sales (sale_date); ANALYZE;`} sql={`SELECT sale_id, sale_date, eur_value
+  FROM sales
+ WHERE sale_date || ' 12:00' > '2024-06-15 08:30';`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 2</summary><div class="d">Any row whose date-plus-time is after 08:30 on 15 June has a date of 15 June or later. That is the implied condition the index can use.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT sale&#95;id, sale&#95;date, eur&#95;value
+  FROM sales
+ WHERE sale&#95;date || ' 12:00' &gt; '2024-06-15 08:30'
+   AND sale&#95;date &gt;= '2024-06-15';
+-- plan: SEARCH sales USING INDEX sales&#95;date (sale&#95;date&gt;?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="A query filters on ADDTIME(date_column, time_column) > ? and the table cannot be changed. There is an index on (date_column, time_column). What gets the index back into play?"
+  options={[
+    'Nothing; only a function-based index on ADDTIME(date_column, time_column) can help.',
+    'An additional, redundant condition date_column >= DATE(?) that the index can use as an access predicate.',
+    'Reordering the index to (time_column, date_column).',
+  ]}
+  answer={1}
+  explain="The derived value is in no index, but the leading column is. A redundant condition on it gives the scan a start point. The original condition stays as a filter, and the approximation reads a few extra rows from the boundary day. A function-based index also works where supported, with the usual costs."
+/>

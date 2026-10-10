@@ -1,0 +1,96 @@
+---
+title: "Practice: the write side"
+subtitle: Three exercises in the playground. Time an insert with and without indexes, give a delete an index for its where clause, and compare updates of an unindexed and an indexed column.
+chapter: dml
+order: 4
+kind: practice
+minutes: 12
+summary: Hands-on exercises for Unit 8. Measure insert time with zero and three extra indexes, watch a delete's select half switch from SCAN to SEARCH, and see which updates have to move index entries.
+prereqs: "You should have read the three lessons of this unit. The playground shows a plan for SELECT statements only, so each exercise uses the select half of a write to inspect the access path."
+outcomes:
+  - Measure how three indexes change the time of a bulk insert
+  - Make a delete find its rows through an index instead of a scan
+  - Tell an update that moves index entries from one that does not
+recap:
+  - Every index adds a tree insert per row. Three indexes make a bulk insert several times slower.
+  - A delete's where clause is planned like a select's. Index it the same way.
+  - An update touches only the indexes that contain a changed column.
+---
+import { Check, TryIt } from '@/components/mdx';
+
+Each playground starts from a fresh copy of the schema. Timings in the browser are noisy; run each statement two or three times and compare the typical value, not the first one.
+
+## Exercise 1: insert with zero and three indexes
+
+The statement inserts 20,000 rows. `sales` starts with only its primary key.
+
+<TryIt id="8.p1" tasks={[
+  { text: 'Run the insert and note the time with only the primary key.', sql: 'insert\\s+into\\s+sales' },
+  { text: 'Create indexes on <code>sale_date</code>, <code>(subsidiary_id, employee_id)</code> and <code>(product_id, sale_date)</code>, then run the insert again in the same box. Compare.', sql: 'create\\s+index[\\s\\S]*create\\s+index[\\s\\S]*create\\s+index[\\s\\S]*insert\\s+into\\s+sales' },
+  { text: 'Drop the three indexes and run the insert once more. The time falls back to roughly the first measurement.', sql: 'drop\\s+index[\\s\\S]*drop\\s+index[\\s\\S]*drop\\s+index' },
+]} sql={`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000)
+INSERT INTO sales (employee_id, subsidiary_id, sale_date, eur_value, product_id, quantity)
+SELECT ((i * 7919) % 1000) + 1, 20,
+       date('2025-10-02', '+' || (i % 90) || ' days'),
+       (i % 900) + 9.9, (i % 300) + 1, (i % 5) + 1
+  FROM n;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX sales&#95;date ON sales (sale&#95;date);
+CREATE INDEX sales&#95;emp ON sales (subsidiary&#95;id, employee&#95;id);
+CREATE INDEX sales&#95;prod ON sales (product&#95;id, sale&#95;date);
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i &lt; 20000)
+INSERT INTO sales (employee&#95;id, subsidiary&#95;id, sale&#95;date, eur&#95;value, product&#95;id, quantity)
+SELECT ((i &#42; 7919) % 1000) + 1, 20, date('2025-10-02', '+' || (i % 90) || ' days'),
+       (i % 900) + 9.9, (i % 300) + 1, (i % 5) + 1
+  FROM n;
+DROP INDEX sales&#95;date; DROP INDEX sales&#95;emp; DROP INDEX sales&#95;prod;</pre></div></details>
+  </Fragment>
+</TryIt>
+
+## Exercise 2: a delete that uses an index
+
+All sales of product 17 are to be removed. Without an index the select half scans the table. The count is 66 rows.
+
+<TryIt id="8.p2" tasks={[
+  { text: 'Run the count. The plan is <code>SCAN sales</code>: a delete with this where clause would read the whole table.', sql: 'count\\s*\\(\\s*\\*\\s*\\)[\\s\\S]*product_id\\s*=\\s*17', plan: '^SCAN sales' },
+  { text: 'Create an index on <code>product_id</code> and run the count again. The plan becomes <code>SEARCH sales USING COVERING INDEX</code>.', sql: 'create\\s+index[\\s\\S]*\\(\\s*product_id\\s*\\)' },
+  { text: 'Run <code>DELETE FROM sales WHERE product_id = 17</code>. The status line should report 66 rows affected.', sql: 'delete\\s+from\\s+sales\\s+where\\s+product_id\\s*=\\s*17' },
+]} sql={`SELECT count(*)
+  FROM sales
+ WHERE product_id = 17;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX sales&#95;product ON sales (product&#95;id);
+SELECT count(&#42;) FROM sales WHERE product&#95;id = 17;
+-- plan: SEARCH sales USING COVERING INDEX sales&#95;product (product&#95;id=?)
+DELETE FROM sales WHERE product&#95;id = 17;
+-- status: done · 66 rows affected</pre></div></details>
+  </Fragment>
+</TryIt>
+
+## Exercise 3: unindexed versus indexed column
+
+The playground has an index on `sale_date`. The first update changes `quantity`, which no index contains. The second changes `sale_date`, which moves an entry in `sales_date` for every row touched.
+
+<TryIt id="8.p3" setup={`CREATE INDEX sales_date ON sales (sale_date);`} tasks={[
+  { text: 'Run the update as given: 20,000 rows, no index entry moves. Note the time.', sql: 'set\\s+quantity\\s*=\\s*quantity\\s*\\+\\s*1' },
+  { text: "Change the SET clause to <code>sale_date = date(sale_date, '+1 day')</code>. Every row's entry in <code>sales_date</code> is removed and re-inserted. Compare the time.", sql: "set\\s+sale_date\\s*=\\s*date\\s*\\(\\s*sale_date" },
+  { text: 'Now set both columns in one statement. The time is close to the second run, not the sum: the table rewrite is shared, and only one index moves.', sql: 'set\\s+quantity[\\s\\S]*sale_date\\s*=\\s*date|set\\s+sale_date\\s*=\\s*date[\\s\\S]*quantity\\s*=' },
+]} sql={`UPDATE sales
+   SET quantity = quantity + 1;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>UPDATE sales SET sale&#95;date = date(sale&#95;date, '+1 day');
+UPDATE sales SET quantity = quantity + 1, sale&#95;date = date(sale&#95;date, '+1 day');</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="In exercise 3 the update of sale_date took noticeably longer than the update of quantity, although both rewrote every row of the table. What is the extra work?"
+  options={[
+    'The date arithmetic is slower than the integer addition.',
+    'Each row\'s entry in the sales_date index had to be removed and inserted at its new position.',
+    'SQLite had to rebuild the primary key.',
+  ]}
+  answer={1}
+  explain="quantity is in no index, so the first update only rewrote table rows. sale_date is the key of sales_date, so the second update also did a delete plus an insert in that index for every row. The primary key contains neither column and stayed untouched in both runs."
+/>

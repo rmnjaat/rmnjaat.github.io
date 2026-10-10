@@ -1,0 +1,35 @@
+---
+title: Indexes Can Degenerate
+subtitle: B-trees rebalance themselves on every write. What people see after a mass delete is bloat, not a lopsided tree, and most rebuilds change nothing.
+section: myth-directory
+order: 1
+summary: Why the belief that indexes degenerate over time and need regular rebuilds is wrong, what index bloat after mass deletes actually is, how much a rebuild can gain at most, and when a rebuild is justified.
+source: https://use-the-index-luke.com/sql/myth-directory/indexes-can-degenerate
+---
+import { Callout } from '@/components/mdx';
+
+The claim: indexes slowly become unbalanced as data changes, lookups get slower, and a periodic rebuild restores them.
+
+## Why people believe it
+
+Binary trees do degenerate. Insert sorted keys into a naive binary tree and it turns into a linked list, with every lookup walking the whole thing. Many developers met trees in that form first, and the word "tree" carries the fear over. Rebuild scripts in every DBA toolbox, which occasionally appear to help, do the rest.
+
+## What actually happens
+
+A B-tree is balanced by construction and stays balanced through every write. When a leaf fills up it splits, and the split propagates upwards only when the parent is full too. Every leaf is always the same number of levels below the root. There is no sequence of inserts or deletes that makes one path longer than another, so there is nothing for a rebuild to straighten out. [The B-Tree](/sql/anatomy/the-tree/) lesson walks through the structure.
+
+The depth of the tree is the number that matters for a lookup, and it is remarkably stable. Roughly speaking, the number of entries has to grow by a factor of a hundred before the tree needs one more level. Leaving space behind through updates and deletes does not change that: an index that is twice as large as it needs to be is almost never one level deeper than it needs to be.
+
+What can happen is that the tree gets emptier than it should be. Deleting a row removes its index entry, but most engines leave the leaf node in place, and a leaf stays allocated until it is empty or merged. Delete most of a table and you are left with a tree of nearly empty leaves. A range scan then reads many leaves to collect few entries, and that is slower, but not because the tree is unbalanced. It is **bloat**: the same number of levels, far more pages than the data needs.
+
+PostgreSQL is the engine where this shows up most, because its row versioning adds the index entries of old row versions to the picture until vacuum reclaims them. Oracle shows the same effect as sparse leaf blocks after mass deletes, and the pattern of deleting old rows from the low end of a sequence-ordered index while inserting at the high end can leave a trail of nearly empty leaves behind. Leaves at roughly 70 percent full after random inserts are normal and not worth fighting.
+
+## What to do instead
+
+Put a number on the possible gain first. A rebuild packs the leaf nodes, and in a badly bloated index that might remove 20 to 30 percent of them. That saving is only felt by operations that read many leaves, a full index scan for instance. For an `INDEX UNIQUE SCAN`, the operation most lookups boil down to, the expected gain is zero to two percent, because the rebuild does not reduce the depth and the depth is all a unique scan pays for. If the goal of the rebuild was to make primary key lookups faster, the rebuild cannot deliver it.
+
+Do not schedule rebuilds on a calendar. Measure. Every engine can report the number of pages in an index and the number of entries, and from that the fill level. A rebuild is justified when the index is a lot larger than a fresh build of the same data would be, typically after deleting a large share of a table, after an archiving job, or when a monitoring query shows a range scan reading far more leaves than its row count explains.
+
+Keep the maintenance processes running; in PostgreSQL that means autovacuum tuned to keep up with the delete rate. And do not treat the index as the problem when the real problem is the query, which [Unit 2 (the where clause)](/sql/where-clause/) covers at length.
+
+<Callout kind="note">A rebuild that makes a query faster is evidence of bloat, not of degeneration. If the index was not bloated, the rebuilt index has the same shape as before and the query runs at the same speed.</Callout>

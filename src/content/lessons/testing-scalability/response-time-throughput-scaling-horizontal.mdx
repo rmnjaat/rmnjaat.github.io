@@ -1,0 +1,94 @@
+---
+title: Response Time and Throughput
+subtitle: Bigger hardware is a wider road, not a faster car. It carries more queries at once and does almost nothing for how long one of them takes.
+chapter: testing-scalability
+order: 3
+kind: lesson
+minutes: 9
+summary: Why more CPUs and more servers raise throughput but not single-query response time, why indexing is the lever for response time even in NoSQL systems, what eventual consistency and the CAP theorem trade away, how infrastructure latency and disk seeks add up, and what caching and SSDs change.
+prereqs: "You should have read <a href='/sql/testing-scalability/system-load/'>System load</a>. Knowing what a B-tree traversal costs, from <a href='/sql/anatomy/the-tree/'>The B-tree</a>, helps with the disk seek arithmetic."
+outcomes:
+  - Why single-core speed stopped growing and what multi-core and horizontal scaling do instead
+  - Why response time and throughput are two different dimensions, and which one hardware moves
+  - What NoSQL horizontal scalability actually buys, and what eventual consistency and the CAP theorem give up
+  - How network hops and disk seeks accumulate into response time, and why production can be slower than a laptop
+  - What caching and SSDs do to the seek cost, and why joins still have a reputation
+recap:
+  - Performance has two dimensions, response time and throughput. More hardware typically raises throughput and leaves response time where it was.
+  - Since the early 2000s single cores have not become much faster. Multi-core CPUs and extra servers run more tasks at once; neither makes one task quicker.
+  - Whatever the database, relational or not, the fastest way to cut response time is a correct index, one that exploits the logarithmic scalability of the B-tree all the way.
+  - NoSQL horizontal scalability mostly helps writes and pays for it with eventual consistency. Strict consistency costs write latency and availability, not necessarily throughput.
+  - Every network hop and every disk seek adds latency. One traversal costs a few dozen milliseconds on spinning disks; a join can trigger thousands of seeks. Caching and SSDs soften this but do not change the shape.
+source: https://use-the-index-luke.com/sql/testing-scalability/response-time-throughput-scaling-horizontal
+---
+import { Callout, KeyIdea, Check, ScaleChart } from '@/components/mdx';
+
+When a system is slow, the first proposal is usually more hardware. A bigger machine rarely makes one query faster; it mostly lets more queries run at once, and those are different things. A wider highway carries more cars; it does not let any one of them drive faster. More hardware, for the same reason, does not automatically fix a slow SQL statement.
+
+## 1. The end of the free lunch
+
+In the 1990s this was not true. Single-core CPU speed climbed so quickly that most response time problems simply vanished on the next generation of hardware, like a new car model that was reliably twice as fast as last year's. That stopped in the first years of this century: single-core performance hit a wall and has barely moved since. To keep selling faster chips, vendors went multi-core. A multi-core CPU runs several tasks at the same time, which is a real gain, but it does nothing for a single task that runs on one core. Performance, it turned out, has more than one dimension.
+
+Scaling horizontally, adding more servers, has the same limit. More servers process more requests. They do not make any one request finish sooner. The query that walks fifty thousand index entries walks fifty thousand entries on whichever node it lands on.
+
+<KeyIdea>Throughput is how many queries the system completes per second. Response time is how long one query takes. Hardware moves the first. The access path moves the second.</KeyIdea>
+
+## 2. Indexing is the response time lever
+
+To make a single search faster you need an efficient search structure, and that is just as true in non-relational systems. [CouchDB](https://couchdb.apache.org/) and [MongoDB](https://www.mongodb.com/) both build their indexes as [B-trees](https://guide.couchdb.org/draft/btree.html), for the [same reasons](https://www.mongodb.com/docs/manual/indexes/) a relational database does.
+
+<Callout kind="important">Whatever the database, relational or not, the fastest way to cut a query's response time is a correct index.</Callout>
+
+Proper indexing means exploiting the [logarithmic scalability](/sql/anatomy/the-tree/) of the B-tree all the way: every condition an access predicate, the scanned range no wider than the result. In practice indexing is done sloppily far more often than not, and the chart from the [data volume](/sql/testing-scalability/data-volume/) lesson shows what sloppy costs.
+
+<ScaleChart client:visible n="3.4" title="Response time by data volume, sloppy and proper indexing" />
+
+The gap between the two index curves is the gap that hardware is being asked to close. It is hardly possible to close it by adding machines, because each machine runs the same scan. And even where enough hardware could bring the slow curve down to an acceptable number, it is worth asking whether buying servers is a sensible fix for a column order.
+
+## 3. What horizontal scalability really buys
+
+Many NoSQL systems promise to make performance problems go away through horizontal scalability. What they mostly scale is **writes**, and the mechanism that lets them do it is **eventual consistency**. SQL databases keep strict consistency, which makes individual writes slower. That is a cost in response time for writes; it does not by itself mean lower throughput.
+
+<Callout kind="note" title="Eventual consistency and the CAP theorem">
+
+Strict consistency in a distributed system means every write is coordinated synchronously across the nodes before it is complete. That has two unwelcome effects: the coordination adds latency to every write, and it lowers availability, because a write can only complete when all the participating nodes are reachable.
+
+A distributed SQL database is often confused with a cluster that shares one storage system or replicates from a primary to replicas. A better picture is a web shop integrated with an ERP system, two products from two vendors that still need to agree. That agreement is usually reached with the [two-phase commit](https://en.wikipedia.org/wiki/Two-phase_commit_protocol) protocol, which gives all-or-nothing global transactions across several databases, and which can only finish when every participant is available. Availability goes down as a result.
+
+The more nodes, the worse this gets; beyond a handful of nodes strict consistency is close to impossible to maintain. Giving it up removes both problems: a write completes on a subset of the nodes and global consistency is restored afterwards. What remains unsolved is conflict. Two nodes can accept contradictory changes, and nothing prevents it. Consistency is [eventually](https://en.wikipedia.org/wiki/Eventual_consistency) reached by resolving conflicts after the fact, not by avoiding them, and "consistent" here means all nodes hold the same data, not necessarily the right data. Brewer's [CAP theorem](https://en.wikipedia.org/wiki/CAP_theorem) describes the general trade-off between consistency, availability and partition tolerance.
+
+</Callout>
+
+## 4. Latency accumulates
+
+More hardware will typically not improve response times, and it can make them worse, because a bigger system is a more complex system and complexity accumulates latency. On a developer's machine the application and the database share a box and the network costs nothing. Production almost never looks like that: the database runs on its own hardware, the application on another, and security policy may put a firewall between them, which often doubles the network latency per round trip. Every extra layer adds a little, and the sum is the counterintuitive experience that the expensive production environment answers more slowly than the cheap desktop it was developed on.
+
+<Callout kind="warning" title="Common mistake">"Just add a read replica." A read replica takes a share of the queries. The report that takes thirty seconds on one node takes thirty seconds on the node it lands on, and the hop to reach it adds a few milliseconds on top.</Callout>
+
+## 5. Disk seeks, caching and SSDs
+
+One latency deserves its own paragraph: the disk seek. A spinning hard disk has to move its heads to the right track before it can read, and that takes a few milliseconds each time. A four-level B-tree traversal does it four times, which comes to a few dozen milliseconds. That is an age for a computer and still below what a person notices, as long as it happens once. A single SQL statement can easily cause hundreds or thousands of seeks, and a join between several tables is the most common way to do it. This is the root of the reputation joins have for being slow, and the [next unit](/sql/join/) is about indexing them so that they are not.
+
+<Callout kind="note" title="Solid state disks and caching">
+
+An SSD has no moving parts, and its seek time is roughly an order of magnitude lower than a spinning disk's. SSDs reached enterprise storage around 2010; the book notes that at the time their price and limited write endurance kept them out of many database deployments, which is no longer the obstacle it was.
+
+Independently of the disk, every database caches frequently used data in main memory, and the data every index lookup needs, above all the root node, is as frequent as it gets. Heavily used indexes are often held entirely in memory, so that a lookup causes no disk seek at all.
+
+</Callout>
+
+Caching and SSDs reduce the seek problem dramatically, and they reduce it for every query equally. What they do not change is the shape of the curve: a scan that visits a hundred times more entries than it returns still does a hundred times more work, it just does it faster per block. The lever that changes the shape is the access path.
+
+<Callout kind="note" title="Further reading">The setup behind the chart is described in [System load](/sql/testing-scalability/system-load/). Wikipedia on [NoSQL](https://en.wikipedia.org/wiki/NoSQL), [eventual consistency](https://en.wikipedia.org/wiki/Eventual_consistency) and the [CAP theorem](https://en.wikipedia.org/wiki/CAP_theorem). B-tree indexes in [CouchDB](https://guide.couchdb.org/draft/btree.html) and [MongoDB](https://www.mongodb.com/docs/manual/indexes/). Markus Winand's article [Choosing NoSQL for the right reason](https://blog.fatalmind.com/2011/05/13/choosing-nosql-for-the-right-reason/).</Callout>
+
+<Check
+  client:visible
+  question="A single report query takes 30 seconds on a lightly loaded server. Four more servers are added behind a load balancer. What happens to that query?"
+  options={[
+    'It takes about 6 seconds, because the work is spread over five machines.',
+    'It still takes about 30 seconds. One query runs on one node and does the same reads. Only a better access path shortens it.',
+    'It gets faster because each server now has a bigger share of the cache.',
+  ]}
+  answer={1}
+  explain="More servers raise throughput: each node serves fewer queries. A single query still does all of its own work on the node it lands on, and with the server lightly loaded there was no queue to remove. Response time is the dimension that indexing moves, not hardware."
+/>

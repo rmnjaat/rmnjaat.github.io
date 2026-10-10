@@ -1,0 +1,439 @@
+---
+title: Nested Loops
+subtitle: The simplest join runs one lookup per row of the driving table. It wants an index on the inner join columns, and it is exactly what an ORM does when it loads lazily, only with a network round trip per row.
+chapter: join
+order: 1
+kind: lesson
+minutes: 12
+summary: "How a join is executed two tables at a time, how the nested loops algorithm works, why it needs an index on the inner join columns, how ORM lazy loading turns the same algorithm into the N+1 selects problem, and how to take control of joins in JPA, Hibernate, DBIx::Class and Doctrine."
+prereqs: "You should know what an access predicate is (<a href='/sql/where-clause/the-equals-operator/concatenated-keys/'>Concatenated keys</a>) and how a function-based index works (<a href='/sql/where-clause/functions/'>Functions</a>)."
+outcomes:
+  - Why a join is sensitive to disk latency and why the right index depends on the join algorithm
+  - How the optimizer joins two tables at a time, pipelines the intermediate result and chooses a join order
+  - How the nested loops join works and which two indexes it needs
+  - Why N+1 selects produced by an ORM are a nested loops join with a round trip per row
+  - How to turn on SQL logging and make JPA, Hibernate, DBIx::Class and Doctrine join in the database
+recap:
+  - A join combines two tables at a time. The optimizer tries the possible join orders, whose number grows factorially, which is one more reason to use bind parameters.
+  - Nested loops reads the driving table once and runs one index lookup on the other table for every row. Index the driving table's where clause and the join columns of the inner table.
+  - Lazy loading in an ORM is a nested loops join executed by the application, with a network round trip per row. Round trips, not bytes, dominate response time.
+  - Turn on SQL logging in development, and make the ORM join in the database with a fetch join, prefetch or leftJoin. Watch for the duplicates, the distinct and the order by it may add.
+  - Nested loops is the right algorithm while the driving result is small. For a large one the optimizer needs a hash join, which it can only choose if the statement contains the join.
+source: https://use-the-index-luke.com/sql/join/nested-loops-join-n1-problem
+---
+import { Callout, KeyIdea, Check, TryIt, Joins, EngineTabs } from '@/components/mdx';
+
+A normalized schema spreads one business fact over several tables. A join gathers the pieces back into the shape one task needs, and gathering scattered pieces is exactly the kind of work that waits on disk latency. Indexing is the cure here too, but the right index depends on how the database runs the join, and there are three algorithms to choose from.
+
+## 1. Two tables at a time
+
+Whatever the algorithm, a join combines two tables. A statement that joins five tables runs four joins: the first produces an intermediate result, the second joins that result to the third table, and so on. The database does not normally store those intermediate results. Each row that comes out of one join is passed straight into the next one, which is called **pipelining**, and it keeps memory use low.
+
+The order in which the tables are joined does not change the result, but it changes the cost a great deal, so the optimizer compares the possible orders and keeps the cheapest. The number of orders grows with the factorial of the number of tables: six tables have 720 orders, ten have more than three million. Planning a complex statement is real work.
+
+<Callout kind="important" title="Bind parameters again">The more tables a statement joins, the more it pays to use [bind parameters](/sql/where-clause/bind-parameters/), because a statement with literal values has to be planned again on every execution. Not using them is like recompiling a program every time you run it.</Callout>
+
+## 2. The nested loops algorithm
+
+Nested loops is the most basic of the three algorithms. The database picks one table as the **driving** (or outer) table and reads its rows one by one. For each row it runs a second query against the other table: find the rows whose join columns hold this row's values. It is a loop inside a loop, and the inner loop is a where-clause search whose value changes on every iteration.
+
+<Joins client:visible n="4.1" mode="nested" switchable={false} />
+
+Step through the figure. The driving table is `sales`. Row s1 refers to employee e2, so the database walks the `employees` primary key tree, finds e2, fetches the row and emits the joined pair. Then s2, then s3, then s4. Every driving row costs one tree traversal and one table access on the inner side.
+
+You could write this algorithm yourself, as a loop in application code that runs one `SELECT` per row. That is a bad idea, because network latency then comes on top of disk latency, and yet it is extremely common, because it is easy to do without noticing. ORM tools are the usual culprit, to the point that the pattern has a name: the **N+1 selects problem**.
+
+## 3. N+1 selects, as three ORMs produce them
+
+The following examples all do the same thing: find the employees whose last name starts with `WIN`, then process each of their sales.
+
+```java
+// JPA, using the CriteriaBuilder interface
+CriteriaBuilder queryBuilder = em.getCriteriaBuilder();
+CriteriaQuery<Employees>
+   query = queryBuilder.createQuery(Employees.class);
+Root<Employees> r = query.from(Employees.class);
+query.where(
+  queryBuilder.like(
+    queryBuilder.upper(r.get(Employees_.lastName)),
+    "WIN%"
+  )
+);
+
+List<Employees> emp = em.createQuery(query).getResultList();
+
+for (Employees e: emp) {
+  // process Employee
+  for (Sales s: e.getSales()) {
+    // process sale for Employee
+  }
+}
+```
+
+Hibernate JPA 3.6.0 sends one statement for the employees and then one more for every employee the loop touches:
+
+```sql
+select employees0_.subsidiary_id as subsidiary1_0_
+       -- MORE COLUMNS
+  from employees employees0_
+ where upper(employees0_.last_name) like ?
+```
+
+```sql
+  select sales0_.subsidiary_id as subsidiary4_0_1_
+         -- MORE COLUMNS
+    from sales sales0_
+   where sales0_.subsidiary_id=?
+     and sales0_.employee_id=?
+```
+
+```sql
+  select sales0_.subsidiary_id as subsidiary4_0_1_
+         -- MORE COLUMNS
+    from sales sales0_
+   where sales0_.subsidiary_id=?
+     and sales0_.employee_id=?
+```
+
+The Perl version uses DBIx::Class:
+
+```perl
+my @employees =
+   $schema->resultset('Employees')
+          ->search({'UPPER(last_name)' => {-like=>'WIN%'}});
+
+foreach my $employee (@employees) {
+   # process Employee
+   foreach my $sale ($employee->sales) {
+      # process Sale for Employee
+   }
+}
+```
+
+DBIx::Class 0.08192 produces the same shape, one driving statement and one per employee:
+
+```sql
+SELECT me.employee_id, me.subsidiary_id
+     , me.last_name, me.first_name, me.date_of_birth
+  FROM employees me
+ WHERE ( UPPER(last_name) LIKE ? )
+```
+
+```sql
+   SELECT me.sale_id, me.employee_id, me.subsidiary_id
+        , me.sale_date, me.eur_value
+     FROM sales me
+    WHERE ( ( me.employee_id = ?
+      AND me.subsidiary_id = ? ) )
+```
+
+```sql
+   SELECT me.sale_id, me.employee_id, me.subsidiary_id
+        , me.sale_date, me.eur_value
+     FROM sales me
+    WHERE ( ( me.employee_id = ?
+      AND me.subsidiary_id = ? ) )
+```
+
+And PHP with Doctrine's query builder:
+
+```php
+$qb = $em->createQueryBuilder();
+$qb->select('e')
+   ->from('Employees', 'e')
+   ->where("upper(e.last_name) like :last_name")
+   ->setParameter('last_name', 'WIN%');
+$r = $qb->getQuery()->getResult();
+foreach ($r as $row) {
+   // process Employee
+   foreach ($row->getSales() as $sale) {
+      // process Sale for Employee
+   }
+}
+```
+
+Doctrine 2.0.5:
+
+```sql
+SELECT e0_.employee_id AS employee_id0 -- MORE COLUMNS
+  FROM employees e0_
+ WHERE UPPER(e0_.last_name) LIKE ?
+```
+
+```sql
+   SELECT t0.sale_id AS SALE_ID1 -- MORE COLUMNS
+     FROM sales t0
+    WHERE t0.subsidiary_id = ?
+      AND t0.employee_id = ?
+```
+
+```sql
+   SELECT t0.sale_id AS SALE_ID1 -- MORE COLUMNS
+     FROM sales t0
+    WHERE t0.subsidiary_id = ?
+      AND t0.employee_id = ?
+```
+
+None of the three wrote a SQL join. Each one queries `sales` with a nested select per employee. If the driving query returns N rows, the application runs N+1 statements, which is where the name comes from.
+
+<Callout kind="tip" title="Turn on SQL logging">Enable the SQL log in development and read what your ORM sends. DBIx::Class: `export DBIC_TRACE=1` in the shell. Doctrine: only in code, with `$config->setSQLLogger(new \Doctrine\DBAL\Logging\EchoSqlLogger)`, so build a configurable logger and make sure it is off in production. Native Hibernate: `<property name="show_sql">true</property>` in `hibernate.cfg.xml`. JPA: in `persistence.xml`, depending on the provider, `eclipselink.logging.level` = `FINE`, `hibernate.show_sql` = `TRUE`, or `openjpa.Log` = `SQL=TRACE`. Most ORMs can also switch logging on programmatically; the risk is shipping that switch to production by accident.</Callout>
+
+## 4. Indexing for nested loops
+
+The nested selects are an anti-pattern, but they describe the join algorithm accurately: the database runs the join exactly as those ORMs did, just without the network in between. So the indexes a nested loops join needs are the ones those two statements would need on their own. The driving query needs a function-based index for the case-insensitive name search, and the inner query needs a concatenated index on the join columns of `sales`:
+
+```sql
+CREATE INDEX emp_up_name ON employees (UPPER(last_name));
+CREATE INDEX sales_emp   ON sales (subsidiary_id, employee_id);
+```
+
+<KeyIdea>Nested loops is a where-clause search executed many times. Index the driving table for its own where clause, and index the inner table for the join columns, as if `WHERE subsidiary_id = ? AND employee_id = ?` were a query of its own.</KeyIdea>
+
+With the same indexes in place, a SQL join still beats the nested selects, even though it performs the identical index lookups, because it saves the network round trips. It stays ahead even when it transfers more data, which it does, because the employee columns are repeated on every sales row. Performance has two dimensions, response time and throughput, or in network terms latency and bandwidth, and [Unit 3](/sql/testing-scalability/response-time-throughput-scaling-horizontal/) showed that latency is what the user feels. Bandwidth barely moves the response time; the number of round trips moves it a lot.
+
+<KeyIdea title="Remember">Execute joins in the database. The count of round trips matters more than the amount of data they carry.</KeyIdea>
+
+## 5. Taking control of joins in the ORM
+
+Every ORM has a way to produce a SQL join. The best-known one is **eager fetching**, configured once in the entity mapping, for example on the `employee` property of the `Sales` class. From then on every access to `sales` also joins `employees`. That is right only if you always want the employee with the sale. A phone directory screen that shows employee details has no use for their sales, and a static setting cannot tell the two cases apart. For good performance you need to decide per query, at runtime.
+
+**Java.** The JPA `CriteriaBuilder` offers `Root.fetch()` to say when and how to join. The example uses a left join so that employees without sales are still returned.
+
+```java
+CriteriaBuilder qb = em.getCriteriaBuilder();
+CriteriaQuery<Employees> q = qb.createQuery(Employees.class);
+Root<Employees> r = q.from(Employees.class);
+q.where(queryBuilder.like(
+    queryBuilder.upper(r.get(Employees_.lastName)),
+    "WIN%")
+);
+
+r.fetch("sales", JoinType.LEFT);
+// needed to avoid duplication of Employee records
+q.distinct(true);
+
+List<Employees> emp = em.createQuery(q).getResultList();
+```
+
+<Callout kind="warning" title="Fetch joins duplicate the parent">JPA and Hibernate return one `Employees` object per joined sales row, so an employee with 30 sales shows up 30 times. Strange as it looks, this is what the specification says (EJB 3.0 persistence, section 4.4.5.3, "Fetch Joins"). Either de-duplicate by hand, for example with a `LinkedHashSet`, or call `distinct()` as above.</Callout>
+
+Hibernate 3.6.0 generates the left join, and an unwanted `distinct` with it:
+
+```sql
+select distinct
+       employees0_.subsidiary_id as subsidiary1_0_0_
+     , employees0_.employee_id as employee2_0_0_
+       -- MORE COLUMNS
+     , sales1_.sale_id as sale1_0__
+  from employees employees0_
+  left outer join sales sales1_
+          on employees0_.subsidiary_id=sales1_.subsidiary_id
+         and employees0_.employee_id=sales1_.employee_id
+ where upper(employees0_.last_name) like ?
+```
+
+JPA has no way to de-duplicate the parents without also asking the database for distinct rows. The `distinct` is a problem because most databases will really sort and compare the rows; only a few notice that the primary keys make the rows unique anyway. Hibernate's native API avoids it by de-duplicating on the client with a result transformer:
+
+```java
+Criteria c = session.createCriteria(Employees.class);
+c.add(Restrictions.ilike("lastName", "Win%"));
+
+c.setFetchMode("sales", FetchMode.JOIN);
+c.setResultTransformer(Criteria.DISTINCT_ROOT_ENTITY);
+
+List<Employees> result = c.list();
+```
+
+```sql
+select this_.subsidiary_id as subsidiary1_0_1_
+     , this_.employee_id as employee2_0_1_
+       -- MORE this_ columns on employees
+     , sales2_.sale_id as sale1_3_
+       -- MORE sales2_ columns on sales
+  from employees this_
+  left outer join sales sales2_
+          on this_.subsidiary_id=sales2_.subsidiary_id
+         and this_.employee_id=sales2_.employee_id
+ where lower(this_.last_name) like ?
+```
+
+Clean SQL, nothing added. Note one detail: Hibernate's `ilike` becomes `lower()`, not `upper()`. The function-based index has to match the function the ORM emits, or the index is useless.
+
+**Perl.** DBIx::Class joins when asked to `prefetch`:
+
+```perl
+my @employees =
+   $schema->resultset('Employees')
+          ->search({ 'UPPER(last_name)' => {-like => 'WIN%'}
+                   , {prefetch => ['sales']}
+                   });
+```
+
+```sql
+SELECT me.employee_id, me.subsidiary_id, me.last_name
+       -- MORE COLUMNS
+  FROM employees me
+  LEFT JOIN sales sales
+         ON (sales.employee_id   = me.employee_id
+        AND  sales.subsidiary_id = me.subsidiary_id)
+ WHERE ( UPPER(last_name) LIKE ? )
+ ORDER BY sales.employee_id, sales.subsidiary_id
+```
+
+Nobody asked for the `ORDER BY`. The database has to sort the whole result to satisfy it, and for a large result that takes time.
+
+**PHP.** Doctrine joins with `leftJoin` when the select list names both aliases:
+
+```php
+$qb = $em->createQueryBuilder();
+$qb->select('e,s')
+   ->from('Employees', 'e')
+   ->leftJoin('e.sales', 's')
+   ->where("upper(e.last_name) like :last_name")
+   ->setParameter('last_name', 'WIN%');
+$r = $qb->getQuery()->getResult();
+```
+
+```sql
+SELECT e0_.employee_id AS employee_id0
+       -- MORE COLUMNS
+  FROM employees e0_
+  LEFT JOIN sales s1_
+         ON e0_.subsidiary_id = s1_.subsidiary_id
+        AND e0_.employee_id = s1_.employee_id
+ WHERE UPPER(e0_.last_name) LIKE ?
+```
+
+## 6. The plan: nested loops outer
+
+All three joins run as a nested loops outer join. The database finds the employees through `emp_up_name` first, then fetches the sales of each one through `sales_emp`.
+
+<EngineTabs>
+  <Fragment slot="oracle">
+  ```
+  ---------------------------------------------------------------
+  |Id |Operation                    | Name        | Rows | Cost |
+  ---------------------------------------------------------------
+  | 0 |SELECT STATEMENT             |             |  822 |   38 |
+  | 1 | NESTED LOOPS OUTER          |             |  822 |   38 |
+  | 2 |  TABLE ACCESS BY INDEX ROWID| EMPLOYEES   |    1 |    4 |
+  |*3 |   INDEX RANGE SCAN          | EMP_UP_NAME |    1 |      |
+  | 4 |  TABLE ACCESS BY INDEX ROWID| SALES       |  821 |   34 |
+  |*5 |   INDEX RANGE SCAN          | SALES_EMP   |   31 |      |
+  ---------------------------------------------------------------
+
+  Predicate Information (identified by operation id):
+  ---------------------------------------------------
+    3 - access(UPPER("LAST_NAME") LIKE 'WIN%')
+        filter(UPPER("LAST_NAME") LIKE 'WIN%')
+    5 - access("E0_"."SUBSIDIARY_ID"="S1_"."SUBSIDIARY_ID"(+)
+          AND  "E0_"."EMPLOYEE_ID"  ="S1_"."EMPLOYEE_ID"(+))
+  ```
+  The operation indented directly under `NESTED LOOPS OUTER` is the driving table; the one after it is the inner lookup, executed once per driving row. The `(+)` marks the outer side of the join.
+  </Fragment>
+  <Fragment slot="db2">
+  ```
+  Explain Plan
+  ---------------------------------------------------------------
+  ID | Operation               |                     Rows |  Cost
+   1 | RETURN                  |                          | 10501
+   2 |  NLJOIN (LEFT)          |               5745 of 57 | 10501
+   3 |   FETCH EMPLOYEES       |       57 of 57 (100.00%) |    49
+   4 |    RIDSCN               |       57 of 57 (100.00%) |     6
+   5 |     SORT (UNIQUE)       |       57 of 57 (100.00%) |     6
+   6 |      IXSCAN EMP_NAME    |    57 of 10000 (   .57%) |     6
+   7 |   FETCH SALES           |     101 of 101 (100.00%) |   183
+   8 |    IXSCAN SALES_EMP     | 101 of 1011118 (   .01%) |    13
+
+  Predicate Information
+   2 - JOIN (Q2.EMPLOYEE_ID = Q3.EMPLOYEE_ID)
+       JOIN (Q2.SUBSIDIARY_ID = Q3.SUBSIDIARY_ID)
+   3 - SARG (Q1.LAST_NAME LIKE ?)
+   6 - START ($INTERNAL_FUNC$() <= Q1.LAST_NAME)
+        STOP (Q1.LAST_NAME <= $INTERNAL_FUNC$())
+        SARG (Q1.LAST_NAME LIKE ?)
+   8 - START (Q2.SUBSIDIARY_ID = Q3.SUBSIDIARY_ID)
+       START (Q2.EMPLOYEE_ID = Q3.EMPLOYEE_ID)
+        STOP (Q2.SUBSIDIARY_ID = Q3.SUBSIDIARY_ID)
+        STOP (Q2.EMPLOYEE_ID = Q3.EMPLOYEE_ID)
+  ```
+  The left input of `NLJOIN (LEFT)` is the driving table, the right input the per-row lookup. This plan was produced with the `UPPER` removed from the where clause and a plain index on `last_name`, named `emp_name` here, because Db2 (LUW) did not pick the function-based index otherwise.
+  </Fragment>
+  <Fragment slot="postgresql">
+  ```
+  Nested Loop Left Join  (cost=0.57..312.40 rows=822 width=40)
+    ->  Index Scan using emp_up_name on employees e0_  (cost=0.28..8.30 rows=1 width=24)
+          Index Cond: ((upper(last_name) ~>=~ 'WIN'::text) AND (upper(last_name) ~<~ 'WIO'::text))
+          Filter: (upper(last_name) ~~ 'WIN%'::text)
+    ->  Index Scan using sales_emp on sales s1_  (cost=0.29..295.80 rows=821 width=18)
+          Index Cond: ((subsidiary_id = e0_.subsidiary_id) AND (employee_id = e0_.employee_id))
+  ```
+  The first child of `Nested Loop` is the driving table, the second is the inner lookup. `EXPLAIN ANALYZE` prints `loops=N` on the inner scan, which is the number of driving rows. For this plan `emp_up_name` was created with `text_pattern_ops`; that, or the `C` collation, is what lets PostgreSQL turn the `LIKE` into the two range conditions in `Index Cond`. The pattern itself stays a `Filter`, which is how a prefix `LIKE` always looks in a PostgreSQL plan.
+  </Fragment>
+  <Fragment slot="sql-server">
+  ```
+  |--Nested Loops(Left Outer Join, OUTER REFERENCES:([e0_].[subsidiary_id], [e0_].[employee_id]))
+       |--Index Seek(OBJECT:([employees].[emp_up_name] AS [e0_]),
+       |        SEEK:([e0_].[up_name] >= 'WIN' AND [e0_].[up_name] < 'WIO') ORDERED FORWARD)
+       |--Index Seek(OBJECT:([sales].[sales_emp] AS [s1_]),
+                SEEK:([s1_].[subsidiary_id]=[e0_].[subsidiary_id]
+                  AND [s1_].[employee_id]=[e0_].[employee_id]) ORDERED FORWARD)
+  ```
+  `OUTER REFERENCES` lists the driving columns that feed the inner seek. SQL Server has no function-based indexes; `emp_up_name` is an index on a computed column `up_name AS UPPER(last_name)`. Key lookups for columns the indexes do not carry are left out here.
+  </Fragment>
+  <Fragment slot="mysql">
+  ```
+  -> Nested loop left join  (cost=96.35 rows=822)
+      -> Index range scan on e0_ using emp_up_name over ('WIN' <= upper(last_name) < 'WIO')  (cost=1.10 rows=1)
+      -> Index lookup on s1_ using sales_emp
+           (subsidiary_id=e0_.subsidiary_id, employee_id=e0_.employee_id)  (cost=82.25 rows=821)
+  ```
+  This is `EXPLAIN FORMAT=TREE`; `emp_up_name` is a functional index (MySQL 8.0.13 or later). The tabular `EXPLAIN` shows the same join as `type: ref` and `key: sales_emp` on the `s1_` row, one lookup per row of the previous table.
+  </Fragment>
+</EngineTabs>
+
+<Callout kind="tip" title="Get to know your ORM">Each ORM controls joins differently, and eager fetching is only one option that not every mapper even offers. Write a handful of small sample queries that exercise your ORM's join features and keep them as a reference. They will show you its surprises, such as duplicated parent rows, before production does.</Callout>
+
+## 7. When nested loops is the right choice
+
+Nested loops performs well when the driving query returns few rows, because the number of inner lookups equals the number of driving rows. When the driving side is large the optimizer may switch to an entirely different algorithm, the hash join of the next lesson. It can only do that if the statement contains the join. An application that runs nested selects has already decided the algorithm, and the optimizer never gets a say.
+
+## 8. See the two loops
+
+SQLite implements only nested loops, so every join in the playground is one. Read the plan from top to bottom: the first line is the driving table, the `SEARCH` under it is the inner lookup, repeated for every driving row. A `BLOOM FILTER` line between them is a cheap pre-check that skips lookups certain to miss.
+
+<TryIt id="4.1" tasks={[
+  { text: 'Run the query. <code>SCAN s</code> is the driving table and <code>SEARCH e USING INDEX sqlite_autoindex_employees_1</code> is the inner lookup through the primary key, once per sales row.', sql: 'subsidiary_id\\s*=\\s*30', plan: 'SEARCH e USING INDEX sqlite_autoindex_employees_1' },
+  { text: 'Create the index <code>sales_emp</code> on <code>sales (subsidiary_id, employee_id)</code>.', sql: 'create\\s+index\\s+sales_emp' },
+  { text: 'Now search the employees whose name starts with <code>WIN</code> (<code>UPPER(e.last_name) LIKE \'WIN%\'</code>) and join their sales. With the new index, <code>employees</code> drives and the sales are found by <code>SEARCH s USING INDEX sales_emp</code>.', sql: "like\\s*'WIN%'", plan: 'SEARCH s USING INDEX sales_emp' },
+]} sql={`SELECT s.sale_date, s.eur_value, e.last_name
+  FROM sales s
+  JOIN employees e
+    ON e.employee_id   = s.employee_id
+   AND e.subsidiary_id = s.subsidiary_id
+ WHERE s.subsidiary_id = 30;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 3</summary><div class="d">Before the index exists, SQLite has to drive from <code>sales</code> no matter how you write the query, because <code>employees</code> is the only side with an index on its join columns. The new index lets it start from the 66 matching employees instead of all 20,000 sales.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX sales&#95;emp ON sales (subsidiary&#95;id, employee&#95;id);
+SELECT e.last&#95;name, s.sale&#95;date, s.eur&#95;value
+  FROM employees e
+  JOIN sales s
+    ON s.subsidiary&#95;id = e.subsidiary&#95;id
+   AND s.employee&#95;id   = e.employee&#95;id
+ WHERE UPPER(e.last&#95;name) LIKE 'WIN%';
+-- plan: SCAN e
+--       SEARCH s USING INDEX sales&#95;emp (subsidiary&#95;id=? AND employee&#95;id=?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="An application loads 500 orders and then reads order.customer.name inside a loop. The SQL log shows 501 statements. What fixes it?"
+  options={[
+    'Create an index on the customer primary key so each lookup gets faster.',
+    'Fetch the customers with a join (a fetch join, prefetch or leftJoin) so the statement count stops depending on the row count.',
+    'Increase the connection pool so the 500 statements can run in parallel.',
+  ]}
+  answer={1}
+  explain="The primary key index already exists; each lookup is already fast. The cost is the 500 round trips. A join in the ORM replaces them with one statement. The database may still run a nested loops join with the same index lookups, but without the network latency per row, and the optimizer is free to pick a hash join if the driving side is large."
+/>

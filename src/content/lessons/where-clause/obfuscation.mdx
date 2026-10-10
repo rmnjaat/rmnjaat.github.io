@@ -1,0 +1,52 @@
+---
+title: Obfuscated Conditions
+subtitle: A where clause can be written so that the optimizer no longer recognises the indexed column. This group collects the popular ways of doing that by accident.
+chapter: where-clause
+order: 7
+kind: lesson
+minutes: 2
+summary: "What an obfuscated condition is, why it prevents proper index usage, and the five anti-patterns the lessons of this group cover: dates, numeric strings, combined columns, smart logic and math."
+prereqs: "You should have read the <a href='/sql/where-clause/functions/'>functions</a> group and know why a function on an indexed column hides it from the index."
+outcomes:
+  - What makes a condition obfuscated
+  - Which five patterns show up again and again
+  - Where each one is covered
+recap:
+  - An obfuscated condition hides the indexed column from the optimizer, so the index that should serve the query is not used.
+  - The patterns are common enough that every developer should recognise and avoid them.
+  - Dates, numeric strings, combined columns, smart logic and math each get a lesson.
+source: https://use-the-index-luke.com/sql/where-clause/obfuscation
+---
+import { KeyIdea, Check } from '@/components/mdx';
+
+An index can only be searched by the values it stores. A condition that compares something derived from the column, rather than the column itself, asks a question the index cannot answer. The [functions](/sql/where-clause/functions/) group showed the obvious form, `UPPER(last_name) = ?`. The forms in this group are harder to spot.
+
+## 1. What obfuscation means here
+
+An obfuscated condition is one that hides the indexed column from the optimizer, so the index that should serve the query is never considered. Nobody writes one on purpose, apart from the two deliberate cases this group covers, in [Combining Columns](/sql/where-clause/obfuscation/concatenation/) and [Math](/sql/where-clause/obfuscation/math/). They happen because the derived value looks like the column, because the database inserted a conversion silently, or because a piece of logic seemed clever. The lessons that follow are a catalogue of anti-patterns every developer should know and avoid.
+
+<KeyIdea>If the column does not stand on its own in the condition, the index on it is not used.</KeyIdea>
+
+## 2. The five patterns
+
+[Date Types](/sql/where-clause/obfuscation/dates/): pay special attention to `DATE` types. Functions that strip a time or format a date hide the column; a range condition does not.
+
+[Numeric Strings](/sql/where-clause/obfuscation/numeric-strings/): do not mix types. A number compared with a text column makes the database convert the column, not the number.
+
+[Combining Columns](/sql/where-clause/obfuscation/concatenation/): use redundant where clauses. A range over a combination of columns needs an extra condition on the leading column to get an access predicate.
+
+[Smart Logic](/sql/where-clause/obfuscation/smart-logic/): the smartest way to make SQL slow. One statement with `OR :param IS NULL` for every optional filter gets a full table scan for all of them.
+
+[Math](/sql/where-clause/obfuscation/math/): databases do not solve equations. Arithmetic on the column side of a comparison has to be moved or indexed.
+
+<Check
+  client:visible
+  question="What do all obfuscated conditions have in common?"
+  options={[
+    'They use a function call that the database does not support.',
+    'The indexed column no longer appears on its own, so the optimizer cannot use the index for an access predicate.',
+    'They return wrong results.',
+  ]}
+  answer={1}
+  explain="The results are correct; the plans are not. In every pattern of this group the column is wrapped in a conversion, a calculation or a logical construct, and the index on the plain column cannot be used to find the rows."
+/>

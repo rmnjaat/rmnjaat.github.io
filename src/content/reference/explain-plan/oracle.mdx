@@ -1,0 +1,181 @@
+---
+title: Oracle
+subtitle: EXPLAIN PLAN and DBMS_XPLAN, the index and table access operations, and the Predicate Information section that separates access() from filter().
+section: explain-plan
+order: 3
+summary: Reading Oracle execution plans for indexing work. EXPLAIN PLAN FOR with DBMS_XPLAN.DISPLAY, DISPLAY_CURSOR with ALLSTATS LAST, the GATHER_PLAN_STATISTICS hint, the INDEX and TABLE ACCESS operations, joins, sorts, and how access() and filter() in Predicate Information tell you what the index really did.
+source: https://use-the-index-luke.com/sql/explain-plan/oracle/getting-an-execution-plan
+---
+import { Callout } from '@/components/mdx';
+
+## Getting an execution plan
+
+`EXPLAIN PLAN FOR` writes the plan the optimizer would use into the `PLAN_TABLE`. It does not run the statement. `DBMS_XPLAN.DISPLAY` then formats the most recent entry.
+
+```sql
+EXPLAIN PLAN FOR
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name = 'Winand';
+
+SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY);
+```
+
+The default format, `TYPICAL`, includes the Predicate Information section that this page is mostly about. If a tool or a custom format drops it, add `+PREDICATE` explicitly: `DBMS_XPLAN.DISPLAY(format => 'BASIC +PREDICATE')`. In SQL*Plus, `SET AUTOTRACE TRACEONLY EXPLAIN` does the same two steps in one.
+
+The plan from `EXPLAIN PLAN` is a prediction. Bind variables are not peeked, and session settings may differ from the application's, so the plan that actually ran can be another one. To see the real plan, run the statement and then ask the shared pool for the cursor.
+
+```sql
+ALTER SESSION SET statistics_level = ALL;
+
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name = 'Winand';
+
+SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR(NULL, NULL, 'ALLSTATS LAST +PREDICATE'));
+```
+
+Three steps, then: switch on the collection of run-time statistics (optional, but without it the plan has no actual figures), execute the statement so that its plan and statistics land in the shared SQL area, and fetch the plan from there. With `NULL, NULL` as the first two arguments, `DISPLAY_CURSOR` picks the last statement of the current session. The `ALLSTATS LAST` format adds the actual row counts, times and buffer reads of the last execution; those columns are only collected when `statistics_level` is `ALL` for the session or the statement carries the `/*+ GATHER_PLAN_STATISTICS */` hint, which is the way to do it for a single statement without touching the session. Add `+COST` to the format string to keep the `Cost` column, which `ALLSTATS` drops by default, so `'LAST ALLSTATS +COST +PREDICATE'` gives everything this page uses. For a statement that ran in another session, pass its `sql_id` and child number from `V$SQL` instead.
+
+<Callout kind="note" title="Tools hide the predicate section">Some clients, Oracle SQL Developer among them, show the plan as a tree and either fold the predicate information into a tooltip or leave it out. When the `Predicate Information` block is missing, run `DBMS_XPLAN` yourself; the distinction between access and filter predicates that this page is about lives nowhere else.</Callout>
+
+<Callout kind="warning" title="Turn off SERVEROUTPUT">In SQL*Plus with `SET SERVEROUTPUT ON`, every statement is followed by a hidden call to `DBMS_OUTPUT`, so `DISPLAY_CURSOR(NULL, NULL, …)` shows the plan of that call instead of yours. Switch it off first.</Callout>
+
+## Operations
+
+The plan is a table with one row per operation. Indentation under `Operation` shows nesting: an operation feeds the one above it with less indentation, and siblings run in the order listed. An asterisk before the `Id` means the Predicate Information section has an entry for that row.
+
+| Operation | What it means |
+| --- | --- |
+| `INDEX UNIQUE SCAN` | Tree traversal only. Used when a unique index guarantees at most one match, so no leaf chain is followed. |
+| `INDEX RANGE SCAN` | Tree traversal plus a walk along the leaf chain from the first match to the last. The standard operation for equality on a non-unique index and for ranges. Can run `DESCENDING`. |
+| `INDEX FULL SCAN` | Reads the whole index in key order, for instance to deliver an `ORDER BY` without sorting. The optimizer chooses it when the order is useful or when the where clause does not constrain the leading column; it may prefer a fast full scan followed by a sort instead. |
+| `INDEX FAST FULL SCAN` | Reads the whole index in storage order with multiblock reads, like a full table scan on a smaller object. Output order is undefined. Used when the index covers all needed columns. |
+| `INDEX SKIP SCAN` | Uses the index although the leading column has no condition, by running one range scan per distinct value of that column. Only sensible when there are few such values. |
+| `TABLE ACCESS BY INDEX ROWID` | Fetches a table row by the ROWID taken from an index entry. Executed once per index entry that passed the index-level predicates. `BATCHED` (12c and later) means several ROWIDs are collected and fetched together to reduce random reads. |
+| `TABLE ACCESS FULL` | Full table scan, multiblock reads, every row examined. |
+| `NESTED LOOPS` | For each row of the first child, execute the second child. The second child is typically an `INDEX RANGE SCAN` or `UNIQUE SCAN`. |
+| `HASH JOIN` | Builds a hash table from the first child and probes it with the second. Only where-clause indexes matter, not join-column indexes. |
+| `MERGE JOIN` | Joins two inputs that are both sorted on the join key; usually preceded by a `SORT JOIN` on each side. |
+| `SORT ORDER BY` | Sorts its input for `ORDER BY`. Needs memory for the whole input and is not pipelined. With `STOPKEY` it keeps only the top N rows, for `FETCH FIRST` or `ROWNUM`, which saves memory but still reads the whole input before the first row comes out. |
+| `SORT GROUP BY` | Grouping by sorting. `SORT GROUP BY NOSORT` means the input already arrives in group order, from an index, and no sort happens. |
+| `HASH GROUP BY` | Grouping by hash table. Output order is undefined. |
+| `SORT AGGREGATE` | A single aggregate over the whole input, such as `COUNT(*)`. Despite the name, nothing is sorted. |
+| `COUNT STOPKEY` | A `ROWNUM` limit. Stops pulling rows once the count is reached. |
+| `WINDOW NOSORT STOPKEY` | A window function such as `ROW_NUMBER()` whose order comes from the child, with the row limit of `FETCH FIRST` applied on the fly. The combination for pipelined top-N queries. |
+| `VIEW` | An inline view or subquery that was not merged into the parent. |
+
+A top-N query is only as fast as the operation below its `STOPKEY`. Stopping an `INDEX RANGE SCAN` after ten rows costs ten rows; stopping a `SORT ORDER BY` after ten rows still costs the whole sort, because the tenth row is not known until every row has been seen. The [top-N lesson](/sql/partial-results/top-n-queries/) builds on exactly this difference.
+
+## Access predicates and filter predicates
+
+The Predicate Information section lists, per operation, which conditions it evaluated and how. `access()` means the condition was used to define where the index scan starts and stops. `filter()` means the condition was checked against each row or entry the operation produced. The same operation can have both.
+
+```sql
+CREATE INDEX emp_sub_name ON employees (subsidiary_id, last_name);
+
+EXPLAIN PLAN FOR
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name = 'Winand';
+
+SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY);
+```
+
+```
+-------------------------------------------------------------------------------------------------------
+| Id  | Operation                           | Name         | Rows  | Bytes | Cost (%CPU)| Time     |
+-------------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT                    |              |    33 |   957 |     3   (0)| 00:00:01 |
+|   1 |  TABLE ACCESS BY INDEX ROWID BATCHED| EMPLOYEES    |    33 |   957 |     3   (0)| 00:00:01 |
+|*  2 |   INDEX RANGE SCAN                  | EMP_SUB_NAME |    33 |       |     1   (0)| 00:00:01 |
+-------------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   2 - access("SUBSIDIARY_ID"=20 AND "LAST_NAME"='Winand')
+```
+
+Both conditions are inside `access()` on the index operation. The range scan starts at the first entry for (20, Winand) and stops at the last; the 33 table accesses it triggers are all hits.
+
+```sql
+EXPLAIN PLAN FOR
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE last_name = 'Winand';
+```
+
+```
+-------------------------------------------------------------------------------
+| Id  | Operation         | Name      | Rows  | Bytes | Cost (%CPU)| Time     |
+-------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT  |           |    66 |  1914 |     4   (0)| 00:00:01 |
+|*  1 |  TABLE ACCESS FULL| EMPLOYEES |    66 |  1914 |     4   (0)| 00:00:01 |
+-------------------------------------------------------------------------------
+
+   1 - filter("LAST_NAME"='Winand')
+```
+
+The index cannot help because its leading column is not in the where clause. The condition becomes a `filter()` on a full table scan. The optimizer sometimes prefers an `INDEX FULL SCAN` or `INDEX SKIP SCAN` instead, especially when the index is small or `subsidiary_id` has few distinct values. In the full-scan case the predicate still appears as `filter("LAST_NAME"='Winand')` on the index line: the whole index is read and each entry is tested. In the skip-scan case the same condition appears as both `access()` and `filter()` on the index line, which is how a skip scan always looks.
+
+The third query shows the split inside one operation.
+
+```sql
+EXPLAIN PLAN FOR
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name LIKE '%and';
+```
+
+```
+   2 - access("SUBSIDIARY_ID"=20)
+       filter("LAST_NAME" LIKE '%and')
+```
+
+Only `subsidiary_id = 20` sets the boundaries of the range scan. The `LIKE` with its leading wildcard is evaluated on every one of the 500 index entries in that range, and only the 33 that pass cause a `TABLE ACCESS BY INDEX ROWID`. Because the filter is on the index operation, it at least saves the table reads for the rest. A filter on a column that is not in the index, `date_of_birth` for instance, would appear as `filter()` on the `TABLE ACCESS` line instead, after the row has already been fetched.
+
+There is one more pattern, and it is the one that fools people. With an index on `(subsidiary_id, last_name, first_name)` and the query `WHERE subsidiary_id = 20 AND first_name = 'Markus'`, Oracle prints the `first_name` condition twice.
+
+```
+   2 - access("SUBSIDIARY_ID"=20 AND "FIRST_NAME"='Markus')
+       filter("FIRST_NAME"='Markus')
+```
+
+The entries of subsidiary 20 are sorted by `last_name`, so `first_name` cannot define a range; the scan covers all 500 entries and tests each one. Oracle lists the condition under `access()` anyway, because the column is part of the index key, and then repeats it under `filter()` because that is what it really is. The reading rule that follows: whenever a condition is listed under `filter()`, believe that line, and treat its appearance under `access()` as decoration.
+
+<Callout kind="important" title="Where the filter sits tells you what it costs">`filter()` on the `INDEX` line: the leaf chain is walked for the whole access range, but rows are fetched only for matches. `filter()` on the `TABLE ACCESS` line: every row in the range is fetched and then checked. Neither is as good as `access()`, which never reads the non-matching entries at all.</Callout>
+
+<Callout kind="warning" title="A filter on an index column is still a filter">An `INDEX RANGE SCAN` with every column of the where clause in `access()` looks like the job is done. If one of them is also a `filter()`, the scanned range grows with the table and the query will degrade with data volume and with load, long after the test system said it was fine. The [range lesson](/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates/) explains the split by example and the [data volume lesson](/sql/testing-scalability/data-volume/) measures the consequences.</Callout>
+
+## Reading the numbers
+
+`EXPLAIN PLAN` output shows estimates only. `Rows` is the number of rows the optimizer expects the operation to produce per execution, `Bytes` their total size, `Cost` the optimizer's unit-less comparison figure with the CPU share in parentheses, and `Time` a rough projection from the cost. The estimates are what the optimizer chose on, so when they are wrong the plan is wrong too.
+
+`DISPLAY_CURSOR` with `ALLSTATS LAST` adds what happened. The plan below belongs to the `LIKE '%and'` query from the previous section, run once with `subsidiary_id = 20`.
+
+```
+----------------------------------------------------------------------------------------------------------
+| Id  | Operation                           | Name         | Starts | E-Rows | A-Rows |   A-Time   | Buffers |
+----------------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT                    |              |      1 |        |     33 |00:00:00.01 |      12 |
+|   1 |  TABLE ACCESS BY INDEX ROWID BATCHED| EMPLOYEES    |      1 |     25 |     33 |00:00:00.01 |      12 |
+|*  2 |   INDEX RANGE SCAN                  | EMP_SUB_NAME |      1 |     25 |     33 |00:00:00.01 |       4 |
+----------------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   2 - access("SUBSIDIARY_ID"=20)
+       filter("LAST_NAME" LIKE '%and')
+```
+
+`Starts` is how often the operation ran. `E-Rows` is the estimate per start; `A-Rows` the actual total across all starts, so multiply `E-Rows` by `Starts` before comparing the two. `A-Time` is cumulative elapsed time including children. `Buffers` is the number of logical block reads, also including children; `Reads` appears when physical reads were needed.
+
+It shows the kind of thing to look for. `A-Rows` of the index operation is 33 because the filter has already been applied by the time rows leave it, but `Buffers` is 4 where the equality version needed 2: the operation walked many more leaf entries than it returned. Compare `Buffers` between the index line and the table line to see how much of the work is index scanning and how much is row fetching, and compare `A-Rows` with the final result to see how many fetched rows were discarded later.
+
+`E-Rows` against `A-Rows` is the other comparison. A large gap on a plain equality means stale statistics; `DBMS_STATS.GATHER_TABLE_STATS` fixes that. A gap on a `LIKE '%…'` or a function call is expected, since the optimizer can only guess at those.

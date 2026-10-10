@@ -1,0 +1,282 @@
+---
+title: ASC, DESC and NULLS FIRST/LAST
+subtitle: An index can be read backwards, so descending costs nothing. Mixing directions in one ORDER BY is where the index definition has to change, and NULL placement is where engines disagree.
+chapter: sorting-grouping
+order: 2
+kind: lesson
+minutes: 10
+summary: Reading an index in reverse for ORDER BY DESC, why mixed ASC and DESC in one ORDER BY cannot be served by either reading direction, how ASC and DESC in the index definition fix it, and which engines support NULLS FIRST and NULLS LAST in queries and in indexes.
+prereqs: "You should have read <a href='/sql/sorting-grouping/indexed-order-by/'>Indexed ORDER BY</a> and know that only the scanned index range has to be in order."
+outcomes:
+  - How the database finds the last matching entry and walks the leaf chain backwards
+  - Why an ORDER BY that mixes ASC and DESC cannot be served by reading in either direction
+  - When ASC and DESC in a CREATE INDEX statement matter, and when they are unnecessary
+  - What NULLS FIRST and NULLS LAST mean, and which engines honour them in queries and in indexes
+recap:
+  - The leaf chain is doubly linked, so one index serves ORDER BY col ASC and ORDER BY col DESC alike. The scan simply starts at the other end.
+  - A mixed ORDER BY needs the index to be defined with the same mix of directions, or its exact mirror. Reading direction alone cannot produce it.
+  - ASC and DESC in the index are only needed for mixed directions. Reversing every column is just a backward read. Secondary indexes on index-organized tables are the exception.
+  - The standard only says NULLs sort together. SQL Server and MySQL have no NULLS FIRST/LAST; Oracle accepts it in queries but not in indexes; PostgreSQL accepts it in both.
+source: https://use-the-index-luke.com/sql/sorting-grouping/order-by-asc-desc-nulls-last
+---
+import { Callout, KeyIdea, Figure, EngineTabs, Check, TryIt } from '@/components/mdx';
+
+The previous lesson treated order as if it had one direction. It has two, and an `ORDER BY` with several columns can mix them. The index does not care about the first case at all. The second case is the one situation where `ASC` and `DESC` in a `CREATE INDEX` statement change what the index can do.
+
+## 1. Reading an index backwards
+
+A pipelined `ORDER BY` works when the scanned index range is in the requested order. It works just as well when the range is in the reverse of the requested order, because the database can read the leaf chain in either direction. Sales since yesterday, latest first, with products descending inside each day:
+
+```sql
+SELECT sale_date, product_id, quantity
+  FROM sales
+ WHERE sale_date >= TRUNC(sysdate) - INTERVAL '1' DAY
+ ORDER BY sale_date DESC, product_id DESC
+```
+
+The index `sales_dt_pr` on `(sale_date, product_id)` is ascending on both columns. The plan shows that the database reads it in reverse.
+
+<EngineTabs>
+  <Fragment slot="db2">
+  ```
+  Explain Plan
+  ---------------------------------------------------------------------
+  ID | Operation                      |                     Rows | Cost
+   1 | RETURN                         |                          |  688
+   2 |  FETCH SALES                   |     394 of 394 (100.00%) |  688
+   3 |   IXSCAN (REVERSE) SALES_DT_PR | 394 of 1009326 (   .04%) |   24
+
+  Predicate Information
+   3 - STOP ((CURRENT DATE - 1 DAYS) <= Q1.SALE_DATE)
+  ```
+  Note that the condition is now the `STOP` key, because the scan runs towards it. Db2 lets you forbid this with `DISALLOW REVERSE SCANS` when creating the index.
+  </Fragment>
+  <Fragment slot="oracle">
+  ```
+  ---------------------------------------------------------------
+  |Id |Operation                    | Name        | Rows | Cost |
+  ---------------------------------------------------------------
+  | 0 |SELECT STATEMENT             |             |  320 |  300 |
+  | 1 | TABLE ACCESS BY INDEX ROWID | SALES       |  320 |  300 |
+  |*2 |  INDEX RANGE SCAN DESCENDING| SALES_DT_PR |  320 |    4 |
+  ---------------------------------------------------------------
+  ```
+  </Fragment>
+  <Fragment slot="postgresql">
+  ```
+  Index Scan Backward using sales_dt_pr on sales
+    Index Cond: (sale_date >= (CURRENT_DATE - 1))
+  ```
+  </Fragment>
+  <Fragment slot="mysql">
+  ```
+          Extra: Backward index scan
+  ```
+  MySQL 8.0 and later print this. Earlier versions read backwards too but said nothing about it.
+  </Fragment>
+  <Fragment slot="sql-server">
+  ```
+  |--Index Seek(OBJECT:([sales].[sales_dt_pr]), SEEK:([sale_date] >= ...) ORDERED BACKWARD)
+  ```
+  </Fragment>
+  <Fragment slot="sqlite">
+  The plan does not mention the direction. `SEARCH sales USING INDEX sales_dt_pr (sale_date>?)` without a temp b-tree line is the sign that the index delivered the order, forwards or backwards.
+  </Fragment>
+</EngineTabs>
+
+The database walks the [tree](/sql/anatomy/the-tree/) down to the *last* entry of the range and then follows the leaf chain towards the start. This is the reason the [leaf nodes](/sql/anatomy/the-leaf-nodes/) are linked in both directions.
+
+<Figure n="6.2" title="Reverse index scan">
+
+| sale_date | product_id | read order |
+| --- | --- | --- |
+| 3 days ago | 12 | |
+| 3 days ago | 47 | |
+| 2 days ago | 5 | |
+| yesterday | 9 | 4th |
+| yesterday | 23 | 3rd |
+| today | 3 | 2nd |
+| today | 77 | 1st, scan starts here |
+
+<p slot="caption">The scan enters the index at the last entry of the range and walks the chain upwards. Both columns come out descending.</p>
+</Figure>
+
+<KeyIdea>An index has no fixed reading direction. One ascending index serves `ORDER BY ... ASC` and `ORDER BY ... DESC` equally well.</KeyIdea>
+
+## 2. Mixed directions cannot be read
+
+Reading backwards only helps when every column of the scanned range is reversed at once. Mix the directions and that no longer holds.
+
+```sql
+SELECT sale_date, product_id, quantity
+  FROM sales
+ WHERE sale_date >= TRUNC(sysdate) - INTERVAL '1' DAY
+ ORDER BY sale_date ASC, product_id DESC
+```
+
+The result has to start with yesterday's sales, products descending, followed by today's sales, products descending. In the ascending index yesterday's products are stored ascending, so the database would have to read yesterday's block backwards, then jump forward to the end of today's block and read that backwards too.
+
+<Figure n="6.3" title="An impossible pipelined ORDER BY">
+
+| sale_date | product_id | wanted position |
+| --- | --- | --- |
+| yesterday | 9 | 3rd |
+| yesterday | 23 | 2nd |
+| yesterday | 61 | 1st |
+| today | 3 | 6th |
+| today | 32 | 5th |
+| today | 77 | 4th |
+
+<p slot="caption">Reading backwards gives today first. Reading forwards gives products ascending. The order the query wants needs a jump from yesterday's smallest product to today's largest, and the leaf chain has no such link.</p>
+</Figure>
+
+There is no pointer from the entry (yesterday, 9) to the entry (today, 77). The index cannot serve this `ORDER BY`, so the database sorts.
+
+## 3. Defining the index with ASC and DESC
+
+Most databases let you set the direction per column in the index definition. That turns the jump into a straight read.
+
+```sql
+DROP INDEX sales_dt_pr;
+
+CREATE INDEX sales_dt_pr
+    ON sales (sale_date ASC, product_id DESC);
+```
+
+<Callout kind="warning" title="MySQL before 8.0 and MariaDB before 10.8">MySQL releases before 8.0 accept `ASC` and `DESC` in a `CREATE INDEX` statement and silently ignore them: the index is built ascending either way. MariaDB honours `DESC` in index definitions only from version 10.8.</Callout>
+
+With the new index the plans lose their sort.
+
+<EngineTabs>
+  <Fragment slot="db2">
+  ```
+  Explain Plan
+  -----------------------------------------------------------
+  ID | Operation            |                     Rows | Cost
+   1 | RETURN               |                          |  675
+   2 |  FETCH SALES         |     387 of 387 (100.00%) |  675
+   3 |   IXSCAN SALES_DT_PR | 387 of 1009326 (   .04%) |   24
+
+  Predicate Information
+   3 - START ((CURRENT DATE - 1 DAYS) <= Q1.SALE_DATE)
+  ```
+  </Fragment>
+  <Fragment slot="oracle">
+  ```
+  ---------------------------------------------------------------
+  |Id | Operation                   | Name        | Rows | Cost |
+  ---------------------------------------------------------------
+  | 0 | SELECT STATEMENT            |             |  320 |  301 |
+  | 1 |  TABLE ACCESS BY INDEX ROWID| SALES       |  320 |  301 |
+  |*2 |   INDEX RANGE SCAN          | SALES_DT_PR |  320 |    4 |
+  ---------------------------------------------------------------
+  ```
+  Oracle implements a `DESC` index column as a function-based index internally.
+  </Fragment>
+</EngineTabs>
+
+<Figure n="6.4" title="Mixed-order index">
+
+| sale_date ASC | product_id DESC | read order |
+| --- | --- | --- |
+| yesterday | 61 | 1st |
+| yesterday | 23 | 2nd |
+| yesterday | 9 | 3rd |
+| today | 77 | 4th |
+| today | 32 | 5th |
+| today | 3 | 6th |
+
+<p slot="caption">Flipping the direction of the second column reverses the arrows inside each day. The end of yesterday's block is now next to the start of today's, so no jump is needed.</p>
+</Figure>
+
+Reversing the direction of the second column turns the arrows within each day around. Where the first arrow ends is now exactly where the second begins, and a plain forward read produces the result.
+
+<KeyIdea title="Remember">A mixed `ORDER BY` needs an index with the same mix of directions, or its exact mirror image read backwards. The direction of an index column has no effect on its use for the where clause.</KeyIdea>
+
+### When you do not need it
+
+`ASC` and `DESC` in the index are only needed to sort individual columns in opposite directions. To reverse *all* columns the database just reads the index backwards, so `(sale_date DESC, product_id DESC)` buys nothing that `(sale_date, product_id)` does not already have.
+
+The one exception is a secondary index on an [index-organized table](/sql/clustering/index-organized-clustered-index/). Such an index implicitly carries the clustering key as its last columns, and you cannot specify a direction for that implicit part. If you need the clustering key descending, the only way is to define every explicit column descending as well and let the database read the whole index in reverse.
+
+## 4. Where NULL goes
+
+Besides `ASC` and `DESC` the SQL standard knows two modifiers that few people use: `NULLS FIRST` and `NULLS LAST`. They arrived as an optional extension in SQL:2003, and support is thin. That matters because the standard does not say where `NULL` sorts. It only requires that all `NULL`s end up together, before or after the other values as the implementation sees fit. Strictly speaking you would have to specify the `NULL` position for every nullable column in an `ORDER BY` to get a well-defined result.
+
+The index stores its entries in one order, with the `NULL` entries at one end. A pipelined `ORDER BY` with an explicit `NULLS` modifier is only possible if the index was built with the same placement, and that is where the engines part ways.
+
+<EngineTabs>
+  <Fragment slot="postgresql">
+  Supports `NULLS FIRST` and `NULLS LAST` in the `ORDER BY` since 8.3 and in the index definition as well. `NULL` sorts as larger than any value by default: last in `ASC`, first in `DESC`.
+  ```sql
+  CREATE INDEX sales_dt_pr ON sales (sale_date ASC, product_id DESC NULLS LAST);
+  ```
+  </Fragment>
+  <Fragment slot="oracle">
+  Supported `NULLS FIRST` and `NULLS LAST` in queries before the standard had them, but as of 23ai does not accept them in index definitions. A query that asks for the non-default placement therefore cannot get a pipelined `ORDER BY`. `NULL` is treated as larger than any value: last in `ASC`, first in `DESC`.
+  </Fragment>
+  <Fragment slot="sql-server">
+  No `NULLS FIRST` or `NULLS LAST` syntax as of SQL Server 2022. `NULL` sorts as smaller than any value: first in `ASC`, last in `DESC`. Index columns accept `ASC` and `DESC`.
+  </Fragment>
+  <Fragment slot="mysql">
+  No `NULLS FIRST` or `NULLS LAST` syntax as of MySQL 8.4. `NULL` sorts as smaller than any value: first in `ASC`, last in `DESC`. `DESC` index columns are real since 8.0.
+  </Fragment>
+  <Fragment slot="db2">
+  Accepts `NULLS FIRST` and `NULLS LAST` in the `ORDER BY` and treats `NULL` as larger than any value, but does not accept the modifier in the index definition.
+  </Fragment>
+  <Fragment slot="sqlite">
+  Accepts `NULLS FIRST` and `NULLS LAST` in the `ORDER BY` since 3.30 and `ASC` and `DESC` in index definitions. `NULL` sorts as smaller than any value: first in `ASC`, last in `DESC`. No `NULLS` modifier in the index definition.
+  </Fragment>
+</EngineTabs>
+
+<Figure n="6.5" title="Database and feature matrix">
+
+| | Db2 | MySQL | Oracle | PostgreSQL | SQLite | SQL Server |
+| --- | --- | --- | --- | --- | --- | --- |
+| Read index backwards | yes | yes | yes | yes | yes | yes |
+| ORDER BY ASC/DESC | yes | yes | yes | yes | yes | yes |
+| Index ASC/DESC | yes | no (before 8.0) | yes | yes | yes | yes |
+| ORDER BY NULLS FIRST/LAST | yes | no | yes | yes | yes | no |
+| NULL is considered | great | small | great | great | small | small |
+| Index NULLS FIRST/LAST | no | no | no | yes | no | no |
+
+<p slot="caption">"NULL is considered" says whether the engine treats NULL as the greatest value (great) or the smallest (small) when sorting ascending. Only PostgreSQL can build an index with an explicit NULL placement.</p>
+</Figure>
+
+<Callout kind="warning" title="Common mistake">Creating a descending index "for the DESC queries". A single-column index, or a multi-column index whose columns all point the same way, already serves both directions. Reach for `DESC` in the index only when the `ORDER BY` mixes directions.</Callout>
+
+## 5. Try it yourself
+
+The playground starts with `sales_dt_pr` on `(sale_date, product_id)`, both ascending. SQLite reports a sort it could avoid for the leading column but not for the rest as `USE TEMP B-TREE FOR LAST TERM OF ORDER BY`.
+
+<TryIt id="6.2" setup={`CREATE INDEX sales_dt_pr ON sales (sale_date, product_id);`} tasks={[
+  { text: 'Run the query as given, both columns descending. The index is read backwards and there is no temp b-tree.', sql: 'sale_date\\s+desc\\s*,\\s*product_id\\s+desc', plan: '^(?![\\s\\S]*TEMP B-TREE)SEARCH sales USING INDEX sales_dt_pr' },
+  { text: 'Change the ORDER BY to <code>sale_date ASC, product_id DESC</code>. The plan now sorts the last term.', sql: 'sale_date\\s+asc\\s*,\\s*product_id\\s+desc', plan: 'TEMP B-TREE FOR LAST TERM OF ORDER BY' },
+  { text: 'Drop the index, recreate it as <code>(sale_date ASC, product_id DESC)</code>, and run the mixed query again. The sort is gone.', sql: 'create\\s+index[\\s\\S]*product_id\\s+desc\\s*\\)' },
+]} sql={`SELECT sale_date, product_id, quantity
+  FROM sales
+ WHERE sale_date >= '2025-09-01'
+ ORDER BY sale_date DESC, product_id DESC;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 3</summary><div class="d">You can run several statements in one go. Separate them with semicolons and run the SELECT once more afterwards.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>DROP INDEX sales&#95;dt&#95;pr;
+CREATE INDEX sales&#95;dt&#95;pr ON sales (sale&#95;date ASC, product&#95;id DESC);
+SELECT sale&#95;date, product&#95;id, quantity
+  FROM sales
+ WHERE sale&#95;date &gt;= '2025-09-01'
+ ORDER BY sale&#95;date ASC, product&#95;id DESC;
+-- plan: SEARCH sales USING INDEX sales&#95;dt&#95;pr (sale&#95;date&gt;?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="The index is sales (sale_date, product_id), both ascending. Which ORDER BY still needs a sort operation?"
+  options={[
+    'ORDER BY sale_date DESC, product_id DESC',
+    'ORDER BY sale_date DESC, product_id ASC',
+    'ORDER BY sale_date ASC',
+  ]}
+  answer={1}
+  explain="Reading the index backwards yields both columns descending, so the first option is served. The third is the plain forward read. Only the mixed order has no reading direction that produces it, so that query sorts unless the index is defined as (sale_date DESC, product_id ASC) or its mirror image (sale_date ASC, product_id DESC)."
+/>

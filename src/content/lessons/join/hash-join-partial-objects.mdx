@@ -1,0 +1,368 @@
+---
+title: Hash Join
+subtitle: Build a hash table from one side, probe it with the other. An index on the join columns does nothing here. What helps is fewer rows and fewer columns going into the hash table, which is hard to get out of an ORM.
+chapter: join
+order: 2
+kind: lesson
+minutes: 11
+summary: "How the hash join builds and probes, why indexes on join columns are useless for it and only independent where conditions should be indexed, why the hash table must fit in memory, and how selecting fewer columns (partial objects in JPA, Hibernate, DBIx::Class and Doctrine) shrinks it."
+prereqs: "You should have read <a href='/sql/join/nested-loops-join-n1-problem/'>Nested loops</a> and know what an independent where condition is: one that refers to a single table."
+outcomes:
+  - How the hash join replaces per-row tree traversals with one in-memory hash table
+  - Why the join columns do not need an index, and which conditions do
+  - Why the same indexes serve a hash join whichever side ends up hashed
+  - How fewer rows and fewer columns shrink the hash table, and why the memory footprint is what counts
+  - How to load partial objects in JPA, Hibernate, DBIx::Class and Doctrine
+recap:
+  - Hash join loads the candidate rows of one side, ideally the smaller, into an in-memory hash table keyed by the join columns, then reads the other side once and probes.
+  - Indexing the join columns does not help a hash join. Index the independent where conditions on each table instead; that works whichever side is hashed.
+  - The hash table must fit in memory. Shrink it horizontally with extra conditions and vertically by selecting only the columns the query needs. 97 percent less is possible.
+  - ORMs make partial objects hard. Use constructor expressions or DTOs in JPA and HQL, a slimmer result class with +columns in DBIx::Class, and partial in Doctrine 2. Beware the property-level N+1 of lazy properties.
+  - "A hash join needs at least one equality condition to hash on. Range conditions in the join predicate become filters after the probe; a join with no equality at all usually falls back to nested loops. MySQL has hash joins since 8.0.18."
+source: https://use-the-index-luke.com/sql/join/hash-join-partial-objects
+---
+import { Callout, KeyIdea, Check, Joins, EngineTabs, TryIt } from '@/components/mdx';
+
+The hash join goes after the weak point of nested loops: one B-tree traversal for every driving row. Instead of looking rows up one at a time, it loads the candidate rows from one side into a hash table and probes that table for each row of the other side. Tuning it takes a completely different indexing approach, and there is a second lever, selecting fewer columns, that most ORM tools make difficult to pull.
+
+## 1. Build, then probe
+
+<Joins client:visible n="4.2" mode="hash" switchable={false} />
+
+The join has two phases. In the **build** phase the database reads one side of the join and puts every candidate row into an in-memory hash table keyed by the join columns. In the **probe** phase it reads the other side once; for each row it hashes the join columns, looks into the hash table and emits a result for every match.
+
+Each side is read exactly once, and the per-row work on the probe side is a hash lookup in memory rather than a tree traversal on disk. The hash table lives only as long as the statement runs and is filled in a single pass, which is why nothing on the build side has to be fetched one row at a time, and why no index is needed for that.
+
+## 2. Where the indexes go
+
+Consider a report of the last six months of sales with the details of the employee who made each one:
+
+```sql
+SELECT *
+  FROM sales s
+  JOIN employees e ON (s.subsidiary_id = e.subsidiary_id
+                  AND  s.employee_id   = e.employee_id  )
+ WHERE s.sale_date > trunc(sysdate) - INTERVAL '6' MONTH
+```
+
+The condition on `sale_date` is the only **independent** where condition, meaning it mentions a single table and plays no part in the join. Without any index the plan is two full table scans. The plans in this lesson come from the book's data volume, 10,000 employees and one million sales, not from the 1,000 and 20,000 rows of the playground.
+
+<EngineTabs>
+  <Fragment slot="oracle">
+  ```
+  --------------------------------------------------------------
+  | Id | Operation          | Name      | Rows  | Bytes | Cost |
+  --------------------------------------------------------------
+  |  0 | SELECT STATEMENT   |           | 49244 |    59M| 12049|
+  |* 1 |  HASH JOIN         |           | 49244 |    59M| 12049|
+  |  2 |   TABLE ACCESS FULL| EMPLOYEES | 10000 |     9M|   478|
+  |* 3 |   TABLE ACCESS FULL| SALES     | 49244 |    10M| 10521|
+  --------------------------------------------------------------
+
+  Predicate Information (identified by operation id):
+  ---------------------------------------------------
+     1 - access("S"."SUBSIDIARY_ID"="E"."SUBSIDIARY_ID"
+            AND "S"."EMPLOYEE_ID"  ="E"."EMPLOYEE_ID")
+     3 - filter("S"."SALE_DATE">TRUNC(SYSDATE@!)
+                             -INTERVAL'+00-06' YEAR(2) TO MONTH)
+  ```
+  Step 2 scans `employees` in full and loads all ten thousand rows into the hash table, keyed by the join columns. Step 3 scans `sales` in full, throws away the rows that fail the date condition and probes the hash table for the rest. The join condition appears as an `access` predicate on the `HASH JOIN` line, not on either table. No predicate at all is applied to `employees`: the query has no independent condition on it.
+  </Fragment>
+  <Fragment slot="db2">
+  ```
+  Explain Plan
+  ------------------------------------------------------------
+  ID | Operation          |                       Rows |  Cost
+   1 | RETURN             |                            | 60750
+   2 |  HSJOIN            |             50795 of 10000 | 60750
+   3 |   TBSCAN SALES     | 50795 of 1011118 (  5.02%) | 60053
+   4 |   TBSCAN EMPLOYEES |   10000 of 10000 (100.00%) |   688
+
+  Predicate Information
+   2 - JOIN (Q2.SUBSIDIARY_ID = DECIMAL(Q1.SUBSIDIARY_ID, 10, 0))
+       JOIN (Q2.EMPLOYEE_ID = DECIMAL(Q1.EMPLOYEE_ID, 10, 0))
+   3 - SARG ((CURRENT DATE - 6 MONTHS) < Q2.SALE_DATE)
+  ```
+  `HSJOIN` hashes its second input, `employees`, and probes it with the first. The where clause was written as `WHERE s.sale_date > current_date - 6 MONTH` for Db2.
+  </Fragment>
+  <Fragment slot="postgresql">
+  ```
+  Hash Join  (cost=385.00..14210.50 rows=49244 width=120)
+    Hash Cond: ((s.subsidiary_id = e.subsidiary_id) AND (s.employee_id = e.employee_id))
+    ->  Seq Scan on sales s  (cost=0.00..12530.00 rows=49244 width=60)
+          Filter: (sale_date > (date_trunc('day', now()) - '6 mons'::interval))
+    ->  Hash  (cost=235.00..235.00 rows=10000 width=60)
+          ->  Seq Scan on employees e  (cost=0.00..235.00 rows=10000 width=60)
+  ```
+  The child under `Hash` is the build side; the other child is the probe side. `EXPLAIN ANALYZE` adds `Buckets: … Batches: 1 Memory Usage: …kB` under `Hash`. `Batches` above 1 means the table did not fit into `work_mem` and the join ran in several passes over disk.
+  </Fragment>
+  <Fragment slot="sql-server">
+  ```
+  |--Hash Match(Inner Join, HASH:([e].[subsidiary_id], [e].[employee_id])=([s].[subsidiary_id], [s].[employee_id]))
+       |--Clustered Index Scan(OBJECT:([employees].[employees_pk] AS [e]))
+       |--Clustered Index Scan(OBJECT:([sales].[sales_pk] AS [s]),
+                WHERE:([s].[sale_date] > dateadd(month, -6, …)))
+  ```
+  The first input of `Hash Match` is the build side, the second the probe side. The hash table comes out of the query's memory grant; a warning on the operator in the graphical plan means it spilled to `tempdb`.
+  </Fragment>
+  <Fragment slot="mysql">
+  ```
+  -> Inner hash join (s.subsidiary_id = e.subsidiary_id), (s.employee_id = e.employee_id)  (cost=50312.50 rows=49244)
+      -> Filter: (s.sale_date > (curdate() - interval 6 month))  (cost=10521.00 rows=49244)
+          -> Table scan on s  (cost=10521.00 rows=1011118)
+      -> Hash
+          -> Table scan on e  (cost=1025.00 rows=10000)
+  ```
+  MySQL has had a hash join since version 8.0.18 (2019). The tabular `EXPLAIN` reports it as `Using join buffer (hash join)` on the probe-side row; the hash table is bounded by `join_buffer_size` and a larger build side is processed in chunks.
+  </Fragment>
+  <Fragment slot="sqlite">
+  SQLite has no hash join. When the inner side of a nested loops join has no usable index, it builds a transient B-tree on the join column for the duration of the statement, shown as `SEARCH … USING AUTOMATIC COVERING INDEX`. The cost profile is similar: one pass to build, then one in-memory lookup per outer row.
+  </Fragment>
+</EngineTabs>
+
+<Callout kind="important" title="Indexing the join columns does not help">A hash join never searches an index for the join columns; it compares them inside the hash table. That does not mean a hash join cannot be indexed. The independent conditions, the ones applied while each table is read, can be. Here that is the date condition on `sales`.</Callout>
+
+```sql
+CREATE INDEX sales_date ON sales (sale_date)
+```
+
+<EngineTabs>
+  <Fragment slot="oracle">
+  ```
+  --------------------------------------------------------------
+  | Id | Operation                    | Name      | Bytes| Cost|
+  --------------------------------------------------------------
+  |  0 | SELECT STATEMENT             |           |   59M| 3252|
+  |* 1 |  HASH JOIN                   |           |   59M| 3252|
+  |  2 |   TABLE ACCESS FULL          | EMPLOYEES |    9M|  478|
+  |  3 |   TABLE ACCESS BY INDEX ROWID| SALES     |   10M| 1724|
+  |* 4 |    INDEX RANGE SCAN          | SALES_DATE|      |     |
+  --------------------------------------------------------------
+
+  Predicate Information (identified by operation id):
+  ---------------------------------------------------
+     1 - access("S"."SUBSIDIARY_ID"="E"."SUBSIDIARY_ID"
+            AND "S"."EMPLOYEE_ID"  ="E"."EMPLOYEE_ID"  )
+     4 - access("S"."SALE_DATE" > TRUNC(SYSDATE@!)
+                             -INTERVAL'+00-06' YEAR(2) TO MONTH)
+  ```
+  The sales side now comes through `SALES_DATE`. `employees` is still scanned in full, and will be as long as the query has no independent condition on it.
+  </Fragment>
+  <Fragment slot="db2">
+  ```
+  Explain Plan
+  ----------------------------------------------------------------
+  ID | Operation              |                       Rows |  Cost
+   1 | RETURN                 |                            | 16655
+   2 |  HSJOIN                |             50795 of 10000 | 16655
+   3 |   FETCH SALES          |   50795 of 50795 (100.00%) | 15958
+   4 |    RIDSCN              |   50795 of 50795 (100.00%) |  1655
+   5 |     SORT (UNIQUE)      |   50795 of 50795 (100.00%) |  1655
+   6 |      IXSCAN SALES_DATE | 50795 of 1011118 (  5.02%) |  1631
+   7 |   TBSCAN EMPLOYEES     |   10000 of 10000 (100.00%) |   688
+
+  Predicate Information
+   2 - JOIN (Q2.SUBSIDIARY_ID = DECIMAL(Q1.SUBSIDIARY_ID, 10, 0))
+       JOIN (Q2.EMPLOYEE_ID = DECIMAL(Q1.EMPLOYEE_ID, 10, 0))
+   3 - SARG ((CURRENT DATE - 6 MONTHS) < Q2.SALE_DATE)
+   6 - START ((CURRENT DATE - 6 MONTHS) < Q2.SALE_DATE)
+  ```
+  The cost drops from 60750 to 16655. `employees` is still a `TBSCAN`.
+  </Fragment>
+</EngineTabs>
+
+Unlike nested loops, indexing a hash join is **symmetric**: the join order does not change which indexes are useful. If the optimizer decided to hash the sales side instead, the same `sales_date` index would be used to load the hash table.
+
+<KeyIdea>Index the independent where conditions of each table, and nothing else, for a hash join. The decision does not depend on which side ends up in the hash table.</KeyIdea>
+
+## 3. A smaller hash table
+
+The other way to speed up a hash join is to make the hash table smaller, because the join is only fast while the whole table fits in memory. The optimizer already puts the smaller side into the hash table; the `Bytes` column of the Oracle plan shows its estimate, nine megabytes for `employees` against ten for the sales rows, so `employees` is the one that gets hashed.
+
+The first way to shrink it is **fewer rows**. Suppose `employees` had a `department` column. Adding `AND e.department = 'Sales'` would keep everyone who cannot have sales out of the hash table, and that helps even without an index on `department`, because the saving is in memory, not in the table access. You then have to be sure that no sales rows belong to employees of other departments; a constraint is the right place to pin that assumption down.
+
+The second way is **fewer columns**. The hash table does not hold rows, it holds the columns the query references, so what matters is not the row count but the memory footprint. The report above selects `*`. Name the four columns it really needs instead:
+
+```sql
+SELECT s.sale_date, s.eur_value
+     , e.last_name, e.first_name
+  FROM sales s
+  JOIN employees e ON (s.subsidiary_id = e.subsidiary_id
+                  AND  s.employee_id   = e.employee_id  )
+ WHERE s.sale_date > trunc(sysdate) - INTERVAL '6' MONTH
+```
+
+```
+--------------------------------------------------------------
+| Id | Operation                    | Name      | Bytes| Cost|
+--------------------------------------------------------------
+|  0 | SELECT STATEMENT             |           | 2067K| 2202|
+|* 1 |  HASH JOIN                   |           | 2067K| 2202|
+|  2 |   TABLE ACCESS FULL          | EMPLOYEES |  234K|  478|
+|  3 |   TABLE ACCESS BY INDEX ROWID| SALES     |  913K| 1724|
+|* 4 |    INDEX RANGE SCAN          | SALES_DATE|      |  133|
+--------------------------------------------------------------
+```
+
+Oracle now estimates the build side at 234 kilobytes instead of nine megabytes, 97 percent smaller. This kind of change rarely introduces bugs: drop a column that something still reads and you get an error right away.
+
+<KeyIdea title="Remember">A hash join gets faster when its hash table gets smaller. Cut rows with extra conditions, and cut columns by naming only what the query prints.</KeyIdea>
+
+## 4. Partial objects in ORMs
+
+Removing columns from a hand-written statement is easy. With an ORM that maps whole entities it is a real challenge, because support for **partial objects** is thin. The following are the options.
+
+**Java.** JPA lets you mark a property lazy with `@Basic(fetch=FetchType.LAZY)`:
+
+```java
+@Column(name="junk")
+@Basic(fetch=FetchType.LAZY)
+private String junk;
+```
+
+The provider is allowed to ignore it. The specification (EJB 3.0 JPA, section 9.1.18) calls `LAZY` a hint and permits the implementation to fetch the data eagerly anyway. Hibernate 3.6 honours it only with compile-time bytecode instrumentation, which rewrites the compiled classes so that a lazy property is loaded when first accessed. That is transparent to the application and opens a new kind of N+1 problem: one select per row *and property*. It is dangerous because JPA offers no way to say "this time, fetch everything" at runtime.
+
+Hibernate's own query language, HQL, has the `FETCH ALL PROPERTIES` clause for exactly that:
+
+```sql
+select s from Sales s FETCH ALL PROPERTIES
+ inner join fetch s.employee e FETCH ALL PROPERTIES
+ where s.saleDate >:dt
+```
+
+It forces the entity to be loaded completely, instrumentation and `LAZY` notwithstanding. The other option, which works the same way in HQL and JPQL, is to select into a data transfer object instead of an entity:
+
+```sql
+select new SalesHeadDTO(s.saleDate , s.eurValue
+                       ,e.firstName, e.lastName)
+  from Sales s
+  join s.employee e
+ where s.saleDate > :dt
+```
+
+The query fetches only the listed columns and returns plain Java objects, not managed entities. Rewriting a lot of existing code to a new class is often unreasonable, but instrumented lazy loading causes N+1 problems that are usually worse than the original slowness. One workable path is a small interface with only the getters, implemented by both the entity and the DTO, so that read-only consumers accept either. That is typically enough, because the big hash joins come from reports that do not write anything. For a new report, fetch DTOs or a plain `Map` from the start.
+
+**Perl.** DBIx::Class is not an entity manager, so it has no identity map and subclassing a result class causes no aliasing problems; the cookbook recommends it. Define `Sales` on two levels, a slim `SalesHead` and a full `Sales` that adds the rest:
+
+```perl
+package UseTheIndexLuke::Schema::Result::SalesHead;
+use base qw/DBIx::Class::Core/;
+
+__PACKAGE__->table('sales');
+__PACKAGE__->add_columns(qw/sale_id employee_id subsidiary_id
+                            sale_date eur_value/);
+__PACKAGE__->set_primary_key(qw/sale_id/);
+__PACKAGE__->belongs_to('employee', 'Employees',
+           {'foreign.employee_id'   => 'self.employee_id'
+           ,'foreign.subsidiary_id' => 'self.subsidiary_id'});
+
+package UseTheIndexLuke::Schema::Result::Sales;
+use base qw/UseTheIndexLuke::Schema::Result::SalesHead/;
+
+__PACKAGE__->table('sales');
+__PACKAGE__->add_columns(qw/junk/);
+```
+
+The derived class has to repeat the `table` setup. Use whichever class fits the job. For the employee side, `prefetch` loads all columns; `+columns` picks a few:
+
+```perl
+my @sales =
+   $schema->resultset('SalesHead')
+          ->search($cond
+                  ,{      join => 'employee'
+                   ,'+columns' => ['employee.first_name'
+                                  ,'employee.last_name']
+                   }
+                  );
+```
+
+The root table's column list cannot be trimmed this way, which is why `SalesHead` exists. DBIx::Class 0.08192 generates:
+
+```sql
+SELECT me.sale_id,
+       me.employee_id,
+       me.subsidiary_id,
+       me.sale_date,
+       me.eur_value,
+       employee.first_name,
+       employee.last_name
+  FROM sales me
+  JOIN employees employee
+        ON( employee.employee_id   = me.employee_id
+       AND  employee.subsidiary_id = me.subsidiary_id)
+ WHERE(sale_date > ?)
+```
+
+**PHP.** Doctrine 2 selects attributes at runtime with the `partial` keyword. The documentation warns that partially loaded objects may behave oddly, and the keyword is there to make you acknowledge that. The primary key columns must be listed explicitly:
+
+```php
+$qb = $em->createQueryBuilder();
+$qb->select('partial s.{sale_id, sale_date, eur_value},'
+          . 'partial e.{employee_id, subsidiary_id, '
+                     . 'first_name , last_name}')
+   ->from('Sales', 's')
+   ->join('s.employee', 'e')
+   ->where("s.sale_date > :dt")
+   ->setParameter('dt', $dt, Type::DATETIME);
+```
+
+```sql
+SELECT s0_.sale_id       AS sale_id0,
+       s0_.sale_date     AS sale_date1,
+       s0_.eur_value     AS eur_value2,
+       e1_.employee_id   AS employee_id3,
+       e1_.subsidiary_id AS subsidiary_id4,
+       e1_.first_name    AS first_name5,
+       e1_.last_name     AS last_name6,
+       s0_.subsidiary_id AS subsidiary_id7,
+       s0_.employee_id   AS employee_id8
+  FROM sales s0_
+ INNER JOIN employees e1_
+         ON s0_.subsidiary_id = e1_.subsidiary_id
+        AND s0_.employee_id   = e1_.employee_id
+ WHERE s0_.sale_date > ?
+```
+
+Doctrine adds the `subsidiary_id` and `employee_id` of `sales` once more. The objects it returns look like fully loaded ones, but the columns that were not selected stay uninitialized, and reading them does not raise an error.
+
+<Callout kind="warning" title="Common mistake">`SELECT *` costs little in a nested loops join, where each row is fetched once anyway. In a hash join it inflates the build side by every column nobody asked for, and a hash table that no longer fits in memory is the difference between a fast join and a slow one.</Callout>
+
+## 5. What a hash join cannot do
+
+The hash table is keyed by the join columns, so it can only answer "is there a row with exactly this key". A hash join therefore needs at least one equality condition to hash on. Further range conditions in the join predicate, `s.sale_date BETWEEN e.start_date AND e.end_date` for instance, do not rule it out: the equality is hashed and the range is checked afterwards as a filter on each matching pair. MySQL's `EXPLAIN` even prints such conditions as a filter on the hash join line. What a hash join cannot do in most engines is a join with no equality at all, a pure theta join; that one runs as nested loops. MySQL 8.0.20 and later are the exception and hash it anyway, building over a Cartesian product and filtering every pair.
+
+## 6. See the build side in SQLite
+
+SQLite has no hash join, but when the inner table of a join has no index on the join column it builds a temporary B-tree over that column, once, and probes it per outer row. That is the hash join's cost profile with a tree instead of a hash table, and the plan says so.
+
+<TryIt id="4.2" tasks={[
+  { text: 'Run the self-join on <code>product_id</code>, a column with no index. The inner side shows <code>SEARCH p USING AUTOMATIC COVERING INDEX (product_id=?)</code>: SQLite built a lookup structure for the whole statement rather than scanning <code>sales</code> per row.', sql: 'product_id\\s*=', plan: 'AUTOMATIC COVERING INDEX' },
+  { text: 'Create an index on <code>sales (sale_date)</code>, the only independent condition in the statement.', sql: 'create\\s+index' },
+  { text: 'Run the query again. The driving side is now <code>SEARCH s USING INDEX sales_date</code>, and the automatic index is gone: with only 31 driving rows, SQLite judges that building a lookup structure over 20,000 sales no longer pays. A build phase is worth it only when there are many probes.', sql: "sale_date\\s*=\\s*'2024-06-01'", plan: 'SEARCH s USING INDEX sales_date' },
+]} sql={`SELECT s.sale_id, p.sale_id AS other_sale, p.quantity
+  FROM sales s
+  JOIN sales p ON p.product_id = s.product_id
+ WHERE s.sale_date = '2024-06-01';`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 2</summary><div class="d">The join column is not the one to index. The only condition that refers to a single table is <code>s.sale_date = '2024-06-01'</code>.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX sales&#95;date ON sales (sale&#95;date);
+SELECT s.sale&#95;id, p.sale&#95;id AS other&#95;sale, p.quantity
+  FROM sales s
+  JOIN sales p ON p.product&#95;id = s.product&#95;id
+ WHERE s.sale&#95;date = '2024-06-01';
+-- plan: SEARCH s USING INDEX sales&#95;date (sale&#95;date=?)
+--       SCAN p</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="The optimizer runs the six-month sales report as a hash join. Which change makes it faster?"
+  options={[
+    'An index on sales (subsidiary_id, employee_id), because that is the join condition.',
+    'An index on sales (sale_date), and selecting only the columns the report prints.',
+    'Reversing the join order so that sales is loaded into the hash table.',
+  ]}
+  answer={1}
+  explain="A hash join never searches an index with the join columns; it compares them inside the hash table. The date condition is the only independent predicate, so it is the only one an index can serve, and a shorter select list makes the hash table smaller. The optimizer already hashes the smaller side; swapping the order by hand gains nothing and, for a hash join, does not change the indexing either."
+/>

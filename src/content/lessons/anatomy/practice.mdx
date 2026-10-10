@@ -1,0 +1,129 @@
+---
+title: "Practice: reads and scans"
+subtitle: Four exercises on the example schema. Predict the plan before you run the query, then check whether the database agrees with you.
+chapter: anatomy
+order: 4
+kind: practice
+minutes: 12
+summary: "Hands-on exercises for unit 1: a primary key lookup against a scan, counting the block reads a plan implies, creating an index and watching SEARCH appear, and what a composite key does for a query on only part of it."
+prereqs: "You should have finished the three lessons of this unit, in particular <a href='/sql/anatomy/slow-indexes/'>Slow indexes, part I</a>."
+outcomes:
+  - Predict whether a query will SEARCH or SCAN before running it
+  - Estimate the block reads behind a plan from the three steps of a lookup
+  - See the effect of creating an index on an otherwise identical query
+  - Explain why the first column of a composite key matters and the second alone does not
+recap:
+  - SEARCH is a tree traversal; SCAN reads everything. The difference is whether an index starts with the column you filter on.
+  - A covering index skips the table access, which is the step that usually costs the most.
+  - A query on the second column of a composite key alone cannot use the tree. It scans the whole index or the whole table.
+---
+import { Callout, Check, TryIt } from '@/components/mdx';
+
+Each exercise below has its own playground with a fresh copy of the example schema: a thousand employees with a composite primary key on `(employee_id, subsidiary_id)`, and twenty thousand sales. Write down what you expect the plan to say before you press run. The hints give the answer; try without them first.
+
+## Exercise 1: lookup against scan
+
+The primary key of `employees` is a B-tree on `(employee_id, subsidiary_id)`. A lookup by both columns is the best case from the lessons: a traversal, one entry, one row.
+
+Expected result: task 1 returns one row (Maria Chen) with a `SEARCH` plan; task 2 returns 66 rows with a plain `SCAN employees`, because no index begins with `last_name`.
+
+<TryIt id="p1.1" tasks={[
+  { text: 'Run the query as it is. The plan starts with <code>SEARCH employees USING INDEX</code> and names both key columns in the parentheses.', sql: 'employee_id\\s*=\\s*57', plan: 'SEARCH employees USING INDEX .*employee_id=\\? AND subsidiary_id=\\?' },
+  { text: 'Now look up everyone named <code>Winand</code> instead (<code>WHERE last_name = &#39;Winand&#39;</code>). Before you run it: will this SEARCH or SCAN?', sql: 'last_name\\s*=', plan: '^SCAN employees$' },
+]} sql={`SELECT first_name, last_name
+  FROM employees
+ WHERE employee_id = 57
+   AND subsidiary_id = 30;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint</summary><div class="d">The only index on <code>employees</code> is the primary key, and it is sorted by <code>employee_id</code> first. The Winands are scattered through it, so there is no range to traverse to.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT first&#95;name, last&#95;name
+  FROM employees
+ WHERE last&#95;name = 'Winand';
+-- plan: SCAN employees
+-- 66 rows</pre></div></details>
+  </Fragment>
+</TryIt>
+
+## Exercise 2: counting the reads
+
+SQLite does not print block counts, but you can derive them from the plan and the three steps of a lookup. The playground has an index on `sale_date` ready. The first query counts the sales in June 2024; the second fetches a column that is not in the index.
+
+Expected result: both queries find 938 sales. The first plan says `USING COVERING INDEX`, which means step three, the table access, never happened. The second says `USING INDEX`, and the table access ran 938 times.
+
+<TryIt id="p1.2" tasks={[
+  { text: 'Run the count. The plan says <code>SEARCH sales USING COVERING INDEX sales_date</code>. Estimate the reads: two or three blocks for the traversal, then only as many leaf blocks as hold 938 entries, three or four. No table blocks at all.', sql: 'count\\(\\*\\)', plan: 'COVERING INDEX sales_date' },
+  { text: 'Change <code>COUNT(*)</code> to <code>sale_id, eur_value</code>. Same rows, but <code>eur_value</code> is only in the table. The word <code>COVERING</code> disappears: now add up to 938 table block reads to your estimate.', sql: 'eur_value', plan: 'SEARCH sales USING INDEX sales_date' },
+]} setup={`CREATE INDEX sales_date ON sales (sale_date);`} sql={`SELECT COUNT(*)
+  FROM sales
+ WHERE sale_date >= '2024-06-01'
+   AND sale_date <  '2024-07-01';`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint</summary><div class="d">The three steps: traverse the tree (bounded by the depth), walk the leaf chain (bounded by the number of matching entries), fetch each row from the table (one read per match). A covering index answers the query from the entries alone and skips the third step.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT sale&#95;id, eur&#95;value
+  FROM sales
+ WHERE sale&#95;date &gt;= '2024-06-01'
+   AND sale&#95;date &lt;  '2024-07-01';
+-- plan: SEARCH sales USING INDEX sales&#95;date (sale&#95;date&gt;? AND sale&#95;date&lt;?)
+-- 938 rows; roughly 3 + 4 + 938 block reads against 3 + 4 for the count</pre></div></details>
+  </Fragment>
+</TryIt>
+
+## Exercise 3: make SEARCH appear
+
+Back to the Winands. This playground starts without any index on `last_name`. Build one and run the same query twice.
+
+Expected result: the plan goes from `SCAN employees` to `SEARCH employees USING INDEX emp_name (last_name=?)`. The result, 66 rows, is identical.
+
+<TryIt id="p1.3" tasks={[
+  { text: 'Run the query. The plan is <code>SCAN employees</code>: all thousand rows read, 66 kept.', sql: 'last_name\\s*=', plan: '^SCAN employees$' },
+  { text: 'Create an index named <code>emp_name</code> on <code>employees (last_name)</code>.', sql: 'create\\s+index\\s+emp_name' },
+  { text: 'Run the query again. The plan is now a <code>SEARCH</code> using <code>emp_name</code>. The traversal finds the first Winand, the chain walk collects the other 65, the table access fetches each row.', sql: 'last_name\\s*=', plan: 'SEARCH employees USING INDEX emp_name' },
+]} sql={`SELECT first_name, last_name
+  FROM employees
+ WHERE last_name = 'Winand';`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint</summary><div class="d">Run the <code>CREATE INDEX</code> statement on its own; it produces no plan. Then paste the <code>SELECT</code> back and run it.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX emp&#95;name ON employees (last&#95;name);
+SELECT first&#95;name, last&#95;name
+  FROM employees
+ WHERE last&#95;name = 'Winand';
+-- plan: SEARCH employees USING INDEX emp&#95;name (last&#95;name=?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+## Exercise 4: a prefix of the composite key
+
+The primary key index is sorted by `employee_id`, then `subsidiary_id`. That makes it a sorted list of employee ids with the subsidiary only breaking ties. What can it do for a query on one column alone?
+
+Expected result: task 1 finds employee 57 with a `SEARCH` that lists only `employee_id` in the parentheses. Task 2 counts 200 employees in subsidiary 30, but with a `SCAN` of the whole index.
+
+<TryIt id="p1.4" tasks={[
+  { text: 'Run the query. It filters on <code>employee_id</code> only, the first column of the key. The plan is still a <code>SEARCH</code> with <code>(employee_id=?)</code>.', sql: 'employee_id\\s*=\\s*57', plan: 'SEARCH employees USING INDEX .*\\(employee_id=\\?\\)' },
+  { text: 'Count the employees in subsidiary 30 (<code>SELECT COUNT(*) ... WHERE subsidiary_id = 30</code>). Predict first: can the tree find a second column on its own?', sql: 'subsidiary_id\\s*=\\s*30', plan: '^SCAN employees USING COVERING INDEX' },
+]} sql={`SELECT employee_id, subsidiary_id, first_name, last_name
+  FROM employees
+ WHERE employee_id = 57;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint</summary><div class="d">Think of a phone book sorted by last name, then first name. Finding every "Smith" is easy. Finding every "John" means reading the whole book. The index can use a leading prefix of its columns, never a column on its own from further back.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT COUNT(&#42;)
+  FROM employees
+ WHERE subsidiary&#95;id = 30;
+-- plan: SCAN employees USING COVERING INDEX sqlite&#95;autoindex&#95;employees&#95;1
+-- 200. The index is read end to end because it holds both columns,
+-- but there is no traversal: subsidiary&#95;id is not a prefix of the key.</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Callout kind="tip">Exercise 4 is the seed of unit 2. Column order in a multi-column index decides which queries get a traversal and which get a scan, and the [concatenated index](/sql/where-clause/the-equals-operator/concatenated-keys/) lesson builds on exactly this.</Callout>
+
+<Check
+  client:visible
+  question="Which of these plans implies the fewest block reads for a query that matches 938 rows?"
+  options={[
+    'SCAN sales',
+    'SEARCH sales USING INDEX sales_date (sale_date>? AND sale_date<?)',
+    'SEARCH sales USING COVERING INDEX sales_date (sale_date>? AND sale_date<?)',
+  ]}
+  answer={2}
+  explain="The covering variant traverses the tree and walks a few leaf blocks, and stops there. The plain SEARCH adds one table read per matching row, 938 of them. The SCAN reads every block of the table."
+/>

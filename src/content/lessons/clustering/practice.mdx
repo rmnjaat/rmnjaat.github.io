@@ -1,0 +1,110 @@
+---
+title: "Practice: avoid the table"
+subtitle: Four exercises on covering indexes, losing them with SELECT *, filtering inside an index range with a leading-wildcard LIKE, and the clustering key hidden in every secondary index of a clustered table.
+chapter: clustering
+order: 4
+kind: practice
+minutes: 15
+summary: "Hands-on exercises for Unit 5: produce an index-only scan and read USING COVERING INDEX, break it with SELECT *, use an index filter predicate on purpose inside one subsidiary, and see how a secondary index on a WITHOUT ROWID table answers a query for the clustering key by itself."
+---
+import { Check, TryIt } from '@/components/mdx';
+
+Each exercise says what the plan should show. In SQLite, `USING COVERING INDEX` means the table was never read; `USING INDEX` means the index found the entries and the table supplied the rest.
+
+## Exercise 1: an index-only scan
+
+Sum the sales of subsidiary 20 (10,000 rows). Create an index that covers the query, then run it. Expected: `SEARCH sales USING COVERING INDEX … (subsidiary_id=?)`.
+
+<TryIt id="5.p1" tasks={[
+  { text: 'Create an index on <code>sales</code> whose first column is <code>subsidiary_id</code> and whose second column is <code>eur_value</code>.', sql: 'create\\s+index[\\s\\S]*\\(\\s*subsidiary_id\\s*,\\s*eur_value\\s*\\)' },
+  { text: 'Run the sum. The plan must say <code>COVERING INDEX</code>.', sql: 'sum\\(\\s*eur_value\\s*\\)[\\s\\S]*subsidiary_id\\s*=\\s*20', plan: 'COVERING INDEX' },
+  { text: 'Change the query to <code>SUM(quantity)</code>. The same index no longer covers; the plan drops to <code>USING INDEX</code>.', sql: 'sum\\(\\s*quantity\\s*\\)', plan: 'SEARCH sales USING INDEX' },
+]} sql={`SELECT SUM(eur_value)
+  FROM sales
+ WHERE subsidiary_id = 20;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint</summary><div class="d">The where clause decides the first column. The select list only decides which columns to append.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX sales&#95;sub&#95;eur ON sales (subsidiary&#95;id, eur&#95;value);
+SELECT SUM(eur&#95;value) FROM sales WHERE subsidiary&#95;id = 20;
+-- plan: SEARCH sales USING COVERING INDEX sales&#95;sub&#95;eur (subsidiary&#95;id=?)
+SELECT SUM(quantity) FROM sales WHERE subsidiary&#95;id = 20;
+-- plan: SEARCH sales USING INDEX sales&#95;sub&#95;eur (subsidiary&#95;id=?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+## Exercise 2: SELECT * loses it
+
+The setup creates `sales_sub_eur` on `(subsidiary_id, eur_value)`. Run the covered query, then the same where clause with `SELECT *`, then with `eur_value` and `sale_date`. Expected: `COVERING` only in the first plan.
+
+<TryIt id="5.p2" setup={`CREATE INDEX sales_sub_eur ON sales (subsidiary_id, eur_value);`} tasks={[
+  { text: 'Run the query as given: <code>COVERING INDEX sales_sub_eur</code>.', sql: 'select\\s+eur_value\\s+from', plan: 'COVERING INDEX sales_sub_eur' },
+  { text: 'Replace the select list with <code>*</code>. The access predicate is unchanged and <code>COVERING</code> is gone.', sql: 'select\\s+\\*\\s+from\\s+sales', plan: 'SEARCH sales USING INDEX sales_sub_eur' },
+  { text: 'Select <code>eur_value, sale_date</code>. One extra column is enough to bring the table back.', sql: 'select\\s+eur_value\\s*,\\s*sale_date', plan: 'SEARCH sales USING INDEX sales_sub_eur' },
+]} sql={`SELECT eur_value
+  FROM sales
+ WHERE subsidiary_id = 20
+   AND eur_value > 500;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint</summary><div class="d">Covering is a relation between the index and one query. Any column in the select list that the index does not hold ends it.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT &#42; FROM sales WHERE subsidiary&#95;id = 20 AND eur&#95;value &gt; 500;
+-- plan: SEARCH sales USING INDEX sales&#95;sub&#95;eur (subsidiary&#95;id=? AND eur&#95;value&gt;?)
+SELECT eur&#95;value, sale&#95;date FROM sales WHERE subsidiary&#95;id = 20 AND eur&#95;value &gt; 500;
+-- plan: SEARCH sales USING INDEX sales&#95;sub&#95;eur (subsidiary&#95;id=? AND eur&#95;value&gt;?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+## Exercise 3: a filter predicate on purpose
+
+Find the employees of subsidiary 30 whose last name contains `an` (33 of 200). The setup creates `employees_sub_name` on `(subsidiary_id, last_name)`. Expected: with only `last_name` selected the plan is `COVERING INDEX employees_sub_name (subsidiary_id=?)`; the parentheses hold the access predicate alone, and the `LIKE` is checked on the entries. With `phone_number` added, `COVERING` goes but the table is read for 33 rows, not 200. Without the subsidiary, the plan starts with `SCAN employees`: a full scan of the index, since nothing narrows the range.
+
+<TryIt id="5.p3" setup={`CREATE INDEX employees_sub_name ON employees (subsidiary_id, last_name);`} tasks={[
+  { text: 'Write the query with both conditions, selecting <code>last_name</code> only.', sql: "subsidiary_id\\s*=\\s*30[\\s\\S]*like\\s*'%an%'", plan: 'COVERING INDEX employees_sub_name \\(subsidiary_id=\\?\\)' },
+  { text: 'Add <code>phone_number</code> to the select list.', sql: "phone_number[\\s\\S]*like\\s*'%an%'", plan: 'SEARCH employees USING INDEX employees_sub_name' },
+  { text: 'Drop the <code>subsidiary_id</code> condition and keep the <code>LIKE</code>.', sql: "^(?![\\s\\S]*subsidiary_id\\s*=)[\\s\\S]*like\\s*'%an%'", plan: '^SCAN employees' },
+]} sql={`SELECT last_name
+  FROM employees
+ WHERE subsidiary_id = 30;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint</summary><div class="d">A leading wildcard cannot narrow the range, so the index only helps while <code>subsidiary_id</code> confines the scan to one subsidiary's entries.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT last&#95;name FROM employees
+ WHERE subsidiary&#95;id = 30 AND last&#95;name LIKE '%an%';
+-- plan: SEARCH employees USING COVERING INDEX employees&#95;sub&#95;name (subsidiary&#95;id=?)
+SELECT last&#95;name, phone&#95;number FROM employees
+ WHERE subsidiary&#95;id = 30 AND last&#95;name LIKE '%an%';
+-- plan: SEARCH employees USING INDEX employees&#95;sub&#95;name (subsidiary&#95;id=?)
+SELECT last&#95;name FROM employees WHERE last&#95;name LIKE '%an%';
+-- plan: SCAN employees USING COVERING INDEX employees&#95;sub&#95;name</pre></div></details>
+  </Fragment>
+</TryIt>
+
+## Exercise 4: the clustering key in a secondary index
+
+The setup builds `sales_iot`, a `WITHOUT ROWID` copy of `sales` clustered on `sale_id`, with a secondary index on `sale_date`. 32 sales happened on 23 May 2024. Expected: selecting `sale_id` runs as `COVERING INDEX sales_iot_date`, because every secondary index entry carries the clustering key; selecting `eur_value` runs as `USING INDEX sales_iot_date`, one primary key traversal per row. Then do the same on the rowid table `sales` with an index on `sale_date`: the plan looks the same, because in SQLite a rowid table is a B-tree keyed on the rowid too, and `sale_id` is its alias.
+
+<TryIt id="5.p4" setup={`CREATE TABLE sales_iot (sale_id INTEGER PRIMARY KEY, employee_id INTEGER NOT NULL, subsidiary_id INTEGER NOT NULL, sale_date TEXT NOT NULL, eur_value REAL NOT NULL) WITHOUT ROWID; INSERT INTO sales_iot SELECT sale_id, employee_id, subsidiary_id, sale_date, eur_value FROM sales; CREATE INDEX sales_iot_date ON sales_iot (sale_date); CREATE INDEX sales_date ON sales (sale_date);`} tasks={[
+  { text: 'Run the query: the clustering key comes out of the secondary index.', sql: 'select\\s+sale_id\\s+from\\s+sales_iot', plan: 'COVERING INDEX sales_iot_date' },
+  { text: 'Select <code>eur_value</code> from <code>sales_iot</code> instead.', sql: 'select\\s+eur_value\\s+from\\s+sales_iot', plan: 'USING INDEX sales_iot_date' },
+  { text: 'Select <code>sale_id</code> from the ordinary <code>sales</code> table for the same date. The rowid alias is in every index entry, so this is covering as well.', sql: 'select\\s+sale_id\\s+from\\s+sales\\s', plan: 'COVERING INDEX sales_date' },
+]} sql={`SELECT sale_id
+  FROM sales_iot
+ WHERE sale_date = '2024-05-23';`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint</summary><div class="d">A secondary index needs some way to reach the row. On a heap it stores an address; on a clustered table it stores the clustering key. Either way that value is part of the entry and can be selected without touching the table.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT eur&#95;value FROM sales&#95;iot WHERE sale&#95;date = '2024-05-23';
+-- plan: SEARCH sales&#95;iot USING INDEX sales&#95;iot&#95;date (sale&#95;date=?)
+SELECT sale&#95;id FROM sales WHERE sale&#95;date = '2024-05-23';
+-- plan: SEARCH sales USING COVERING INDEX sales&#95;date (sale&#95;date=?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="Exercise 3 adds last_name to an index on subsidiary_id so that a leading-wildcard LIKE is checked on the index entry. What does that change in the execution plan?"
+  options={[
+    'The index range scan reads fewer entries.',
+    'The operations stay the same, but the table access runs for the 33 matching rows instead of all 200 in the subsidiary.',
+    'The LIKE becomes an access predicate.',
+  ]}
+  answer={1}
+  explain="A leading wildcard can never be an access predicate, so the scanned range is the whole subsidiary either way. What the extra column changes is where the filter runs: on the index entry, before the expensive table access, so that only matching rows are fetched."
+/>

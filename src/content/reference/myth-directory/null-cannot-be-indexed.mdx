@@ -1,0 +1,37 @@
+---
+title: Oracle Cannot Index NULL
+subtitle: Oracle leaves rows out of a B-tree only when every indexed column is null. A second column or a constant puts them back.
+section: myth-directory
+order: 3
+summary: Why an Oracle index seems to be useless for IS NULL queries, what the database actually stores, and how a concatenated index or a constant expression makes IS NULL an index access.
+source: https://use-the-index-luke.com/sql/myth-directory/null-cannot-be-indexed
+---
+import { Callout } from '@/components/mdx';
+
+The claim: Oracle does not store null in indexes, so a query with `WHERE column IS NULL` can never use an index.
+
+## Why people believe it
+
+It is half true, and the half that is true is easy to demonstrate. Create an index on a single nullable column, run `WHERE column IS NULL`, and the plan shows a full table scan. The developer concludes that null is not indexable, and the belief sticks because the demonstration is so clean. Other engines, PostgreSQL and SQL Server among them, index null in a single-column index without help, so people moving between engines carry the wrong rule in either direction.
+
+## What actually happens
+
+Oracle omits an index entry when **all** of the indexed columns are null. That is the precise rule, and the single-column case is just the case where "all" means "one". A row whose indexed column is null has no entry at all, so the index cannot answer `IS NULL`; the optimizer knows this and does not even consider the index for that condition.
+
+The rule changes everything for concatenated indexes. An index on `(date_of_birth, subsidiary_id)` has an entry for every employee whose `subsidiary_id` is not null, whatever their `date_of_birth` is. With a `NOT NULL` constraint on `subsidiary_id`, every row is in the index, nulls in `date_of_birth` included, and they sort at the end. `WHERE date_of_birth IS NULL` becomes an index range scan over the trailing entries. The optimizer only does this if it can prove the second column is never null, which is what the constraint is for; without it, the full table scan comes back.
+
+The same trick works without a second real column. Any constant that is never null will do, a number or a string:
+
+```sql
+CREATE INDEX emp_dob ON employees (date_of_birth, 'X');
+```
+
+The literal `'X'` is stored in every entry, so every row has one, and the index now supports `IS NULL` on `date_of_birth`. The constant costs a few bytes per entry. The [NULL in indexes lesson](/sql/where-clause/null/index/) covers this as part of indexing null, the [NOT NULL constraints lesson](/sql/where-clause/null/not-null-constraint/) explains why the optimizer needs the constraint, and the [partial index lesson](/sql/where-clause/null/partial-index/) uses the opposite trick: leaving rows out on purpose to build a small index on the few rows that have a value.
+
+## What to do instead
+
+If a query filters on `IS NULL` in Oracle, give the index a second column that is declared `NOT NULL`, choosing one that other queries use so the index earns its keep twice. If there is no such column, append a constant. Then check the plan for an `INDEX RANGE SCAN` instead of a `TABLE ACCESS FULL`.
+
+Keep the `NOT NULL` constraints honest. The optimizer treats a column as nullable unless told otherwise, and a `DEFAULT` value is not a constraint. Function-based indexes have the same issue: the optimizer cannot know that an expression never returns null unless the expression makes it obvious.
+
+<Callout kind="note">The omission is also a feature. An Oracle index on a mostly-null column stores only the rows that have a value, which makes it tiny and fast for `WHERE column = ?`. That behaviour is what other engines reproduce with a partial index.</Callout>

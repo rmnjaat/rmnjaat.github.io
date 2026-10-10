@@ -1,0 +1,132 @@
+---
+title: "Practice: index the join"
+subtitle: Four exercises on reading a join plan, finding the inner lookup, watching SQLite build an index on the fly, shrinking the rows that flow through the join, and indexing the independent conditions of each side.
+chapter: join
+order: 4
+kind: practice
+minutes: 15
+summary: "Hands-on exercises for Unit 4: identify the driving table and the inner lookup in a nested loops plan, see an automatic index appear on a non-indexed join column, make the inner side covering by selecting fewer columns, and index the independent where conditions on both tables."
+---
+import { Check, TryIt } from '@/components/mdx';
+
+Each exercise states what the plan should show. SQLite runs every join as nested loops, so the first line of the plan is the driving table and every `SEARCH` below it is a lookup executed once per driving row. A `BLOOM FILTER` line is a cheap pre-check and can be ignored.
+
+## Exercise 1: find the inner lookup
+
+Join the sales of subsidiary 30 to their employees. Expected: 4,000 rows, a plan whose first line is `SCAN s` and whose lookup line is `SEARCH e USING INDEX sqlite_autoindex_employees_1 (employee_id=? AND subsidiary_id=?)`. Then swap the two tables in the `FROM` clause and check that nothing changes, because `employees` is the only side with an index on its join columns.
+
+<TryIt id="4.p1" tasks={[
+  { text: 'Write the join and read the plan. The primary key of <code>employees</code> is the inner lookup.', sql: 'join[\\s\\S]*subsidiary_id\\s*=\\s*30', plan: 'SEARCH e USING INDEX sqlite_autoindex_employees_1' },
+  { text: 'Put <code>employees e</code> first in the <code>FROM</code> clause and run again. The plan is the same: SQLite still drives from <code>sales</code>.', sql: 'from\\s+employees\\s+e\\s+join\\s+sales', plan: 'SEARCH e USING INDEX sqlite_autoindex_employees_1' },
+]} sql={`SELECT s.sale_date, s.eur_value, e.last_name
+  FROM sales s
+  JOIN employees e
+    ON e.employee_id   = s.employee_id
+   AND e.subsidiary_id = s.subsidiary_id
+ WHERE s.subsidiary_id = 30;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint</summary><div class="d">The join condition has to name both primary key columns, <code>employee_id</code> and <code>subsidiary_id</code>, or the lookup cannot use the whole key.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT s.sale&#95;date, s.eur&#95;value, e.last&#95;name
+  FROM employees e
+  JOIN sales s
+    ON s.employee&#95;id   = e.employee&#95;id
+   AND s.subsidiary&#95;id = e.subsidiary&#95;id
+ WHERE s.subsidiary&#95;id = 30;
+-- plan: SCAN s
+--       SEARCH e USING INDEX sqlite&#95;autoindex&#95;employees&#95;1 (employee&#95;id=? AND subsidiary&#95;id=?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+## Exercise 2: a join column without an index
+
+Find the other sales of the products sold on 1 June 2024, by joining `sales` to itself on `product_id`, a column with no index. Expected: the inner side shows `SEARCH p USING AUTOMATIC COVERING INDEX (product_id=?)`. SQLite builds a temporary index over the join column once, which is the closest it gets to a hash join's build phase. Then give the driving side the index its own condition deserves, and watch the automatic index disappear: with 31 driving rows, a build phase no longer pays for itself.
+
+<TryIt id="4.p2" tasks={[
+  { text: 'Write the self-join on <code>product_id</code> with <code>s.sale_date = \'2024-06-01\'</code>. Find <code>AUTOMATIC COVERING INDEX</code> in the plan.', sql: 'sales\\s+p\\s+on\\s+p\\.product_id', plan: 'AUTOMATIC COVERING INDEX \\(product_id=\\?\\)' },
+  { text: 'Create an index on <code>sales (sale_date)</code>, the independent condition of the driving side.', sql: 'create\\s+index[\\s\\S]*\\(\\s*sale_date\\s*\\)' },
+  { text: 'Run the join again. The driving side is now <code>SEARCH s USING INDEX sales_date</code>, and the inner side is a plain <code>SCAN p</code>: too few probes to justify building an index.', sql: 'sales\\s+p\\s+on\\s+p\\.product_id', plan: 'SEARCH s USING INDEX sales_date[\\s\\S]*SCAN p' },
+]} sql={`SELECT s.sale_id, p.sale_id AS other_sale, p.quantity
+  FROM sales s
+  JOIN sales p ON p.product_id = s.product_id
+ WHERE s.sale_date = '2024-06-01';`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint</summary><div class="d">An index on <code>product_id</code> would replace the automatic index, but the exercise is about the other condition: the only one that refers to a single table.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX sales&#95;date ON sales (sale&#95;date);
+SELECT s.sale&#95;id, p.sale&#95;id AS other&#95;sale, p.quantity
+  FROM sales s
+  JOIN sales p ON p.product&#95;id = s.product&#95;id
+ WHERE s.sale&#95;date = '2024-06-01';
+-- plan: SEARCH s USING INDEX sales&#95;date (sale&#95;date=?)
+--       SCAN p</pre></div></details>
+  </Fragment>
+</TryIt>
+
+## Exercise 3: fewer columns through the join
+
+The setup creates `sales_emp` on `sales (subsidiary_id, employee_id)`. Count the sales per employee of subsidiary 30. Expected: the sales side is index-only, `SEARCH s USING COVERING INDEX sales_emp (subsidiary_id=?)`, because the join needs nothing from `sales` beyond the two key columns; the employee side still reads the table for `last_name`. Then add `SUM(s.eur_value)` to the select list and watch the sales side lose `COVERING`, because the join now has to carry a column that is not in the index.
+
+<TryIt id="4.p3" setup={`CREATE INDEX sales_emp ON sales (subsidiary_id, employee_id);`} tasks={[
+  { text: 'Run the query. The sales lookup is index-only.', sql: 'count\\(\\*\\)', plan: 'SEARCH s USING COVERING INDEX sales_emp' },
+  { text: 'Add <code>SUM(s.eur_value)</code> next to the count. The sales side drops to <code>USING INDEX sales_emp</code>: one table read per row, for a column nobody could find in the index.', sql: 'sum\\(\\s*s\\.eur_value\\s*\\)', plan: 'SEARCH s USING INDEX sales_emp' },
+]} sql={`SELECT e.last_name, COUNT(*)
+  FROM employees e
+  JOIN sales s
+    ON s.subsidiary_id = e.subsidiary_id
+   AND s.employee_id   = e.employee_id
+ WHERE e.subsidiary_id = 30
+ GROUP BY e.employee_id, e.last_name;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint</summary><div class="d">The hash join lesson said the hash table holds only the columns the query references. The same is true of what a nested loops join has to fetch: every selected column that is not in the index is a table read per row.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT e.last&#95;name, COUNT(&#42;), SUM(s.eur&#95;value)
+  FROM employees e
+  JOIN sales s
+    ON s.subsidiary&#95;id = e.subsidiary&#95;id
+   AND s.employee&#95;id   = e.employee&#95;id
+ WHERE e.subsidiary&#95;id = 30
+ GROUP BY e.employee&#95;id, e.last&#95;name;
+-- plan: SEARCH s USING INDEX sales&#95;emp (subsidiary&#95;id=?)
+--       SEARCH e USING INDEX sqlite&#95;autoindex&#95;employees&#95;1 (employee&#95;id=? AND subsidiary&#95;id=?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+## Exercise 4: an independent condition on each side
+
+List the sales of subsidiary 30 since 1 June 2024 with the employee's name. There are two independent conditions, `e.subsidiary_id = 30` and `s.sale_date >= '2024-06-01'`. Expected: 3,060 rows. Without an index the driving side is `SCAN s`. After you index `sales (sale_date)`, it becomes `SEARCH s USING INDEX sales_date (sale_date>?)` while the employee lookup stays on the primary key.
+
+<TryIt id="4.p4" tasks={[
+  { text: 'Write the join with both conditions and run it. The driving side is a full <code>SCAN s</code>.', sql: "sale_date\\s*>=\\s*'2024-06-01'[\\s\\S]*subsidiary_id\\s*=\\s*30|subsidiary_id\\s*=\\s*30[\\s\\S]*sale_date\\s*>=\\s*'2024-06-01'", plan: '^SCAN s' },
+  { text: 'Create an index on <code>sales (sale_date)</code>.', sql: 'create\\s+index[\\s\\S]*\\(\\s*sale_date\\s*\\)' },
+  { text: 'Run the join again. The date index drives; the primary key still answers the lookup.', sql: "sale_date\\s*>=", plan: 'SEARCH s USING INDEX sales_date \\(sale_date>\\?\\)[\\s\\S]*SEARCH e USING INDEX sqlite_autoindex_employees_1' },
+]} sql={`SELECT e.last_name, s.sale_date, s.eur_value
+  FROM employees e
+  JOIN sales s
+    ON s.subsidiary_id = e.subsidiary_id
+   AND s.employee_id   = e.employee_id
+ WHERE e.subsidiary_id = 30
+   AND s.sale_date >= '2024-06-01';`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint</summary><div class="d">Each independent condition belongs to one table and is indexed as if that table were queried alone. The condition on <code>employees</code> is already served by the lookup through the primary key, so the date on <code>sales</code> is the one that is missing.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX sales&#95;date ON sales (sale&#95;date);
+SELECT e.last&#95;name, s.sale&#95;date, s.eur&#95;value
+  FROM employees e
+  JOIN sales s
+    ON s.subsidiary&#95;id = e.subsidiary&#95;id
+   AND s.employee&#95;id   = e.employee&#95;id
+ WHERE e.subsidiary&#95;id = 30
+   AND s.sale&#95;date &gt;= '2024-06-01';
+-- plan: SEARCH s USING INDEX sales&#95;date (sale&#95;date&gt;?)
+--       SEARCH e USING INDEX sqlite&#95;autoindex&#95;employees&#95;1 (employee&#95;id=? AND subsidiary&#95;id=?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="In exercise 4 the plan drives from sales through sales_date and looks up employees by primary key. Which index would a hash join use for the same statement?"
+  options={[
+    'Only sales_date; the employee lookup through the primary key is a nested loops technique and a hash join would scan employees, filtered by subsidiary, into the hash table.',
+    'Both, in the same roles: sales_date for the driving side and the primary key for the per-row lookup.',
+    'Neither; a hash join never uses indexes.',
+  ]}
+  answer={0}
+  explain="A hash join indexes the independent conditions of each side and nothing else. sales_date serves the date condition. The primary key does not help the join itself; an index on employees (subsidiary_id) would serve the other independent condition. Per-row lookups by join column are the nested loops strategy."
+/>

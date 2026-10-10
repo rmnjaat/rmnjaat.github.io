@@ -1,0 +1,122 @@
+---
+title: "Practice: paging"
+subtitle: Four exercises in the playground. Stop a top-N query early, feel the cost of OFFSET, seek with row values, and number rows with a window function.
+chapter: partial-results
+order: 4
+kind: practice
+minutes: 15
+summary: Hands-on exercises for Unit 7. Make LIMIT stop early with an index, watch OFFSET grow with the page number, replace it with a (sale_date, sale_id) row value seek, and page with ROW_NUMBER.
+prereqs: "You should have read the three lessons of this unit and know what <code>USE TEMP B-TREE FOR ORDER BY</code> and <code>SEARCH ... (sale_date&lt;?)</code> mean in a SQLite plan."
+outcomes:
+  - Make a LIMIT query pipelined with the right index
+  - Measure how OFFSET cost grows with the page number
+  - Write a seek condition with row values on (sale_date, sale_id)
+  - Page with ROW_NUMBER and see what the index does and does not do for it
+recap:
+  - LIMIT stops early only when the ORDER BY comes from an index.
+  - OFFSET walks the index from the start; the time grows with the offset.
+  - "A row value boundary, (sale_date, sale_id) < (?, ?), lands on the page in one tree traversal."
+  - ROW_NUMBER gets its order from the index, but SQLite still numbers every row.
+---
+import { Check, TryIt } from '@/components/mdx';
+
+Each playground starts from a fresh copy of the schema. The status line under the result shows the time; browser timings are noisy, so run a statement a few times before you trust a number.
+
+## Exercise 1: a LIMIT that stops early
+
+Ten newest sales. Without an index SQLite sorts all 20,000 rows and the limit trims the output. With an index on `sale_date` the scan runs backwards and stops after ten entries.
+
+<TryIt id="7.p1" tasks={[
+  { text: 'Run the query and find <code>USE TEMP B-TREE FOR ORDER BY</code>. Note the time.', sql: 'order\\s+by\\s+sale_date\\s+desc[\\s\\S]*limit\\s+10', plan: 'TEMP B-TREE FOR ORDER BY' },
+  { text: 'Create an index on <code>sale_date</code> and run the query again. The plan is <code>SCAN sales USING INDEX</code> without a temp b-tree, and the time drops.', sql: 'create\\s+index[\\s\\S]*\\(\\s*sale_date\\s*\\)' },
+  { text: 'Add <code>WHERE subsidiary_id = 20</code>. The index is still used, but now the scan walks past the other subsidiaries. Which index would fix that?', sql: 'subsidiary_id\\s*=\\s*20[\\s\\S]*limit' },
+]} sql={`SELECT sale_id, sale_date, eur_value
+  FROM sales
+ ORDER BY sale_date DESC
+ LIMIT 10;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 3</summary><div class="d">The equality column has to come before the sort column. Create the index and compare the two plans.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX sales&#95;sub&#95;date ON sales (subsidiary&#95;id, sale&#95;date);
+SELECT sale&#95;id, sale&#95;date, eur&#95;value
+  FROM sales
+ WHERE subsidiary&#95;id = 20
+ ORDER BY sale&#95;date DESC
+ LIMIT 10;
+-- plan: SEARCH sales USING INDEX sales&#95;sub&#95;date (subsidiary&#95;id=?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+## Exercise 2: the cost of OFFSET
+
+The playground has `sales_date_id` on `(sale_date, sale_id)`, so the order is pipelined. The only variable is how far the offset makes the scan walk before it starts returning rows.
+
+<TryIt id="7.p2" setup={`CREATE INDEX sales_date_id ON sales (sale_date, sale_id);`} tasks={[
+  { text: 'Run page 2 (<code>OFFSET 10</code>) and note the time.', sql: 'offset\\s+10\\b', plan: '^SCAN sales USING INDEX sales_date_id' },
+  { text: 'Change it to <code>OFFSET 5000</code> and run it a few times. The plan is identical; the time is not.', sql: 'offset\\s+5000', plan: '^SCAN sales USING INDEX sales_date_id' },
+  { text: 'Try <code>OFFSET 19000</code>. The last page of a long result is its most expensive one.', sql: 'offset\\s+19000' },
+]} sql={`SELECT sale_id, sale_date, eur_value
+  FROM sales
+ ORDER BY sale_date DESC, sale_id DESC
+ LIMIT 10 OFFSET 10;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Why does the plan not change?</summary><div class="d">An index knows where a value is, not where the 5,001st entry is. The scan always starts at the end of the index and counts.</div></details>
+  </Fragment>
+</TryIt>
+
+## Exercise 3: seek with row values
+
+Same index. Page 501 by offset ends with sale 11887 on 2025-04-24. Fetch page 502 without counting.
+
+<TryIt id="7.p3" setup={`CREATE INDEX sales_date_id ON sales (sale_date, sale_id);`} tasks={[
+  { text: "Replace the OFFSET with <code>WHERE (sale_date, sale_id) &lt; ('2025-04-24', 11887)</code> and <code>LIMIT 10</code>. The plan says <code>SEARCH ... (sale_date&lt;?)</code>.", sql: '\\(\\s*sale_date\\s*,\\s*sale_id\\s*\\)\\s*<\\s*\\(', plan: 'SEARCH sales USING INDEX sales_date_id \\(sale_date<\\?\\)' },
+  { text: "Now seek on the date alone: <code>WHERE sale_date &lt; '2025-04-24'</code>. Compare the first row with the previous result. Which rows went missing?", sql: "where\\s+sale_date\\s*<\\s*'2025-04-24'", plan: 'SEARCH sales USING INDEX sales_date_id \\(sale_date<\\?\\)' },
+  { text: "Go backwards: fetch the ten rows <em>before</em> the boundary with <code>&gt;</code> and an ascending ORDER BY.", sql: '\\(\\s*sale_date\\s*,\\s*sale_id\\s*\\)\\s*>\\s*\\([\\s\\S]*order\\s+by\\s+sale_date\\s*(asc)?\\s*,\\s*sale_id\\s*(asc)?\\s*limit' },
+]} sql={`SELECT sale_id, sale_date, eur_value
+  FROM sales
+ ORDER BY sale_date DESC, sale_id DESC
+ LIMIT 10 OFFSET 5010;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 2</summary><div class="d">Every sale on 2025-04-24 with a sale_id below 11887 belongs to page 502, and the date-only boundary skips all of them.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT sale&#95;id, sale&#95;date, eur&#95;value
+  FROM sales
+ WHERE (sale&#95;date, sale&#95;id) &lt; ('2025-04-24', 11887)
+ ORDER BY sale&#95;date DESC, sale&#95;id DESC
+ LIMIT 10;
+-- backwards: the page before the boundary, in reverse
+SELECT sale&#95;id, sale&#95;date, eur&#95;value
+  FROM sales
+ WHERE (sale&#95;date, sale&#95;id) &gt; ('2025-04-24', 11887)
+ ORDER BY sale&#95;date, sale&#95;id
+ LIMIT 10;</pre></div></details>
+  </Fragment>
+</TryIt>
+
+## Exercise 4: a ROW_NUMBER page
+
+Same index. The window function gets its order from the index, but SQLite numbers every row before the outer filter sees one.
+
+<TryIt id="7.p4" setup={`CREATE INDEX sales_date_id ON sales (sale_date, sale_id);`} tasks={[
+  { text: 'Run the query. Inside the co-routine the plan reads <code>SCAN sales USING INDEX sales_date_id</code>: no sort for the window.', sql: 'row_number\\s*\\(\\s*\\)\\s*over[\\s\\S]*rn\\s+between\\s+11\\s+and\\s+20', plan: 'SCAN sales USING INDEX sales_date_id' },
+  { text: 'Change the filter to <code>rn BETWEEN 5001 AND 5010</code> and compare the time with the seek query from exercise 3. The window is still an offset in disguise.', sql: 'rn\\s+between\\s+5001\\s+and\\s+5010' },
+]} sql={`SELECT sale_id, sale_date, eur_value
+  FROM (SELECT sale_id, sale_date, eur_value,
+               ROW_NUMBER() OVER (ORDER BY sale_date DESC, sale_id DESC) AS rn
+          FROM sales) numbered
+ WHERE rn BETWEEN 11 AND 20
+ ORDER BY rn;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 2</summary><div class="d">Add a seek condition inside the subquery, WHERE (sale_date, sale_id) &lt; ('2025-04-24', 11887), and renumber from 1 to get the best of both.</div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="In exercise 2 the plan for OFFSET 10 and OFFSET 19000 was identical, but the second ran much slower. Why?"
+  options={[
+    'The plan is cached, so SQLite did not notice the larger offset.',
+    'The index is walked from the end in both cases; the offset only changes how many entries are counted and discarded before ten are returned.',
+    'The larger offset forced a sort that the plan does not show.',
+  ]}
+  answer={1}
+  explain="An offset is applied to the stream of ordered rows. The index supplies the order, but the database still has to produce and skip every row before the page. The plan describes the access path, not the amount of work, and the amount grows with the offset."
+/>

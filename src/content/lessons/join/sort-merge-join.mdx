@@ -1,0 +1,154 @@
+---
+title: Sort-Merge Join
+subtitle: Sort both inputs on the join columns and close them like a zipper. Fully symmetric, one pass over each side, able to do a full outer join in one go, and only worth it when the order comes for free.
+chapter: join
+order: 3
+kind: lesson
+minutes: 7
+summary: How the sort-merge join zips two sorted inputs together, why it is the only fully symmetric join, why it can run a full outer join in one pass, why it is rarely chosen, and when an index that delivers order makes it the best choice.
+prereqs: "You should have read <a href='/sql/join/hash-join-partial-objects/'>Hash join</a>; the sort-merge join is indexed the same way."
+outcomes:
+  - How two sorted inputs are merged in a single pass
+  - Why the join order does not matter at all, not even for performance, and what that means for outer joins
+  - Which indexes a sort-merge join needs, and why the join columns are not among them
+  - Why sorting both sides makes it rare, and when a pre-sorted input makes it win
+recap:
+  - Sort-merge join sorts both sides by the join columns, then walks them together, advancing whichever side has the smaller key.
+  - It is fully symmetric. Neither side is outer or inner, the join order has no effect even on performance, and a left and right outer join can run at once as a full outer join.
+  - "It needs the same indexes as a hash join: the independent where conditions. Indexing the join columns is not required."
+  - Sorting both inputs is expensive, which is why the hash join, which prepares only one side, is usually chosen. The sort-merge join wins when the inputs already arrive in order, for example from an index.
+  - MySQL has no sort-merge join at all.
+source: https://use-the-index-luke.com/sql/join/sort-merge-join
+---
+import { Callout, KeyIdea, Check, Joins, EngineTabs, TryIt } from '@/components/mdx';
+
+The third algorithm is the oldest one. Like the hash join it processes the two sides independently before combining them; unlike the hash join it needs no lookup structure in memory. What it needs is order: both sides sorted by the join columns, so that they can be closed like a zipper.
+
+## 1. Two sorted lists, one pass
+
+<Joins client:visible n="4.3" mode="merge" switchable={false} />
+
+The database keeps a cursor on each sorted input and compares the two current keys. If they are equal it emits the pair (and, for duplicates on either side, every combination of the matching rows). If they differ, it advances the side with the smaller key. When one side runs out, the join is done. Each input is read once, front to back, and the output arrives sorted by the join columns.
+
+## 2. Absolute symmetry
+
+A nested loops join has a driving side; a hash join has a build side that must fit in memory. The sort-merge join has neither. Swapping the two inputs changes nothing, not even the performance, and that is unique among the three algorithms.
+
+The property matters most for outer joins. With the other algorithms the direction of an outer join, left or right, dictates the join order: the preserved side has to drive. A sort-merge join is free of that constraint, and it can even preserve both sides in the same pass, which is a **full outer join**. The figure above shows the zipper itself; a full outer join adds nothing to the mechanism, it simply emits the unmatched rows on either side, padded with nulls, as the cursors pass them.
+
+<KeyIdea>Sort-merge is the only join algorithm for which the join order is irrelevant. It can run a left outer join, a right outer join, or both at once, in one pass over each input.</KeyIdea>
+
+## 3. Where the indexes go
+
+The indexing strategy is the one from the hash join lesson. Each side is read in one go, so what helps is an index for the independent where conditions, the ones that cut the candidate rows of one table before the join starts. Indexing the join columns for lookups does nothing, because there are no lookups.
+
+```sql
+SELECT e.last_name, s.sale_date, s.eur_value
+  FROM employees e
+  JOIN sales s
+    ON s.subsidiary_id = e.subsidiary_id
+   AND s.employee_id   = e.employee_id
+ ORDER BY e.subsidiary_id, e.employee_id;
+```
+
+<EngineTabs>
+  <Fragment slot="oracle">
+  ```
+  --------------------------------------------------------------------
+  | Id | Operation                     | Name         | Rows  | Cost |
+  --------------------------------------------------------------------
+  |  0 | SELECT STATEMENT              |              | 20000 |  310 |
+  |  1 |  MERGE JOIN                   |              | 20000 |  310 |
+  |  2 |   TABLE ACCESS BY INDEX ROWID | EMPLOYEES    |  1000 |   12 |
+  |  3 |    INDEX FULL SCAN            | EMPLOYEES_PK |  1000 |    4 |
+  |* 4 |   SORT JOIN                   |              | 20000 |  298 |
+  |  5 |    TABLE ACCESS FULL          | SALES        | 20000 |   45 |
+  --------------------------------------------------------------------
+  ```
+  The first input arrives sorted from `INDEX FULL SCAN` on the primary key; the second has to be sorted by `SORT JOIN`. With an index on `sales (subsidiary_id, employee_id)` the `SORT JOIN` disappears and both inputs come from index scans. Unlike the hash join plans, this one was taken at the playground's volume, 1,000 employees and 20,000 sales.
+  </Fragment>
+  <Fragment slot="postgresql">
+  ```
+  Merge Join  (cost=0.57..1810.40 rows=20000 width=30)
+    Merge Cond: ((e.subsidiary_id = s.subsidiary_id) AND (e.employee_id = s.employee_id))
+    ->  Index Scan using employees_pk on employees e  (cost=0.28..52.00 rows=1000 width=16)
+    ->  Index Scan using sales_emp on sales s  (cost=0.29..1230.00 rows=20000 width=18)
+  ```
+  Both children are index scans in key order, so no `Sort` node appears. Without `sales_emp` the second child would be `Sort` with `Sort Key: s.subsidiary_id, s.employee_id` over a `Seq Scan`.
+  </Fragment>
+  <Fragment slot="sql-server">
+  ```
+  |--Merge Join(Inner Join, MERGE:([e].[subsidiary_id], [e].[employee_id])=([s].[subsidiary_id], [s].[employee_id]))
+       |--Clustered Index Scan(OBJECT:([employees].[employees_pk] AS [e]), ORDERED FORWARD)
+       |--Index Scan(OBJECT:([sales].[sales_emp] AS [s]), ORDERED FORWARD)
+  ```
+  `ORDERED FORWARD` on both inputs means the indexes deliver the order. Without `sales_emp` the second input becomes a `Sort` over a scan.
+  </Fragment>
+  <Fragment slot="db2">
+  ```
+            20000
+            MSJOIN
+            (   2)
+           /      \
+       1000        20000
+      FETCH        SORT
+      (   3)      (   5)
+      /    \        |
+   IXSCAN  EMPLOYEES  20000
+   (   4)           TBSCAN
+     |              (   6)
+  EMPLOYEES_PK        |
+                    SALES
+  ```
+  `MSJOIN` needs both inputs ordered. The left one comes from `IXSCAN` on the primary key; the right one needs a `SORT` because there is no index on the sales join columns. Create one and the `SORT` becomes an `IXSCAN`.
+  </Fragment>
+  <Fragment slot="mysql">
+  MySQL does not implement a sort-merge join. It joins with nested loops or, since 8.0.18, a hash join, and sorts afterwards for the `ORDER BY`.
+  </Fragment>
+  <Fragment slot="sqlite">
+  SQLite does not implement a sort-merge join either. Every join is nested loops, with an automatic index on the inner side when nothing better exists. It does run full outer joins, since version 3.39, by scanning the right side a second time for the unmatched rows.
+  </Fragment>
+</EngineTabs>
+
+## 4. Why it is rare, and when it wins
+
+Once both inputs are sorted the merge is very fast. The problem is getting there: sorting a large input means reading all of it into memory or temp space and writing it back in order, and a sort-merge join has to do that for both sides. A hash join prepares only one side, the smaller one. That is why optimizers seldom choose the sort-merge join, and why the hash join is the better algorithm in most situations.
+
+The picture changes when the inputs are already in order. An index on the join columns delivers its entries sorted, so reading it in order replaces the sort entirely, and the same holds for an input that a previous step in the plan already produced sorted. Then the sort-merge join reads each side once and does nothing else. [Unit 6](/sql/sorting-grouping/) is about exactly this trick, using index order so that the database never sorts at all, and it is worth far more than the choice of join algorithm.
+
+<Callout kind="note" title="Equality only">Like the hash join, the sort-merge join needs an equality condition between the join columns to know when two keys match. A range condition in the join predicate leaves the optimizer with nested loops.</Callout>
+
+## 5. See the sort disappear
+
+SQLite cannot show a merge join, but it can show the one thing that makes the merge cheap: an index that delivers rows in the order the statement needs, so that the sort step vanishes from the plan.
+
+<TryIt id="4.3" tasks={[
+  { text: 'Run the query. The plan ends with <code>USE TEMP B-TREE FOR ORDER BY</code>: SQLite sorts the 4,000 rows after reading them.', sql: 'order\\s+by\\s+s?\\.?employee_id', plan: 'TEMP B-TREE FOR ORDER BY' },
+  { text: 'Create an index on <code>sales (subsidiary_id, employee_id)</code> and run the query again. The sort line is gone; the index delivers the order.', sql: 'create\\s+index' },
+  { text: 'Confirm it: the plan now reads <code>SEARCH s USING COVERING INDEX sales_emp</code> and nothing else.', sql: 'order\\s+by', plan: '^(?![\\s\\S]*TEMP B-TREE)[\\s\\S]*sales_emp' },
+]} sql={`SELECT s.sale_id, s.employee_id
+  FROM sales s
+ WHERE s.subsidiary_id = 30
+ ORDER BY s.employee_id;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 2</summary><div class="d">The index must start with the equality column and continue with the order column, so that the entries for subsidiary 30 are adjacent and already in <code>employee_id</code> order.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX sales&#95;emp ON sales (subsidiary&#95;id, employee&#95;id);
+SELECT s.sale&#95;id, s.employee&#95;id
+  FROM sales s
+ WHERE s.subsidiary&#95;id = 30
+ ORDER BY s.employee&#95;id;
+-- plan: SEARCH s USING COVERING INDEX sales&#95;emp (subsidiary&#95;id=?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="When does a sort-merge join beat a hash join?"
+  options={[
+    'Always, because it reads each input only once.',
+    'When both inputs already arrive ordered by the join columns, from an index or an earlier step, so that no sort is needed.',
+    'When the inner table has an index on the join columns, like for nested loops.',
+  ]}
+  answer={1}
+  explain="A hash join also reads each input once, and it prepares only one side. The sort-merge join only wins when it does not have to pay for sorting, which is the case when the inputs are already in order. An index for per-row lookups is the nested loops strategy and does nothing for a merge."
+/>

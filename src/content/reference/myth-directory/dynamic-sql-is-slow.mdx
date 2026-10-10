@@ -1,0 +1,99 @@
+---
+title: Dynamic SQL Is Slow
+subtitle: SQL built at runtime is cached and planned exactly like SQL typed into a file, as long as the values are bind parameters and not pasted into the text.
+section: myth-directory
+order: 4
+summary: Why generating SQL at runtime is not slow in itself, what embedded, dynamic and static SQL mean, hard and soft parsing, how ORMs build conditional where clauses with bind parameters, the prepare-once pitfall, and why dynamic SQL with bind parameters is the fix for the smart-logic anti-pattern rather than the cause of it.
+source: https://use-the-index-luke.com/sql/myth-directory/dynamic-sql-is-slow
+---
+import { Callout } from '@/components/mdx';
+
+The claim: SQL statements assembled at runtime are slower than static statements, so an application should always use one fixed statement per use case.
+
+## Why people believe it
+
+Dynamic SQL earned the reputation honestly. A statement built by concatenating values into the text is a new statement every time it runs. The database parses and optimizes it, caches the plan, and never sees that text again. A busy application can fill the statement cache with thousands of plans for what is really one query, and the optimizing time shows up in every request. Add SQL injection and it is reasonable to tell a team never to build SQL at runtime.
+
+The rule then gets applied to the wrong thing. "Dynamic SQL" comes to mean any statement the program assembles, whether or not it contains literal values, and the cure is a single static statement that handles every combination of search criteria.
+
+The words are worth sorting out, because the myth lives in their overlap. **Embedded SQL** is SQL written directly into the source of a host language, compiled with the program, and fixed at compile time; PL/SQL and Transact-SQL work this way, and so do the old precompilers for C. **Dynamic SQL** is SQL handled as a string that the program can change before it hands it to the database; that is how almost every application written with JDBC, ODBC, or an ORM talks to its database. **Static SQL** is SQL whose text does not change at run time. The last two are not opposites: a string constant passed to `executeQuery` is dynamic in mechanism and static in text. Whether a statement is slow depends on the text, not on the mechanism.
+
+```java
+String sql = "SELECT first_name, last_name FROM employees "
+           + "WHERE employee_id = " + employeeId;
+ResultSet rs = con.createStatement().executeQuery(sql);
+```
+
+This is the statement that gave dynamic SQL its reputation. The text changes with every employee, so the database sees a new statement each time. Replace the concatenation with a `?` placeholder and a `setInt` call, and the text is constant: the same mechanism, now static SQL, cached and reused. Not using bind parameters is what misuse of dynamic SQL looks like; it is also an open door for SQL injection. Changing values is not a reason to change the statement text. Changing the structure of the statement, which no bind parameter can do, is.
+
+## What actually happens
+
+The database does not know or care how the statement text came to exist. It hashes the text and looks it up in its cache. If an identical text is there, the cached plan is reused. If the text differs by a single character, it is a new statement. What matters is whether the text is stable, and the text is stable if values are passed as bind parameters rather than written into it. A statement built at runtime with `?` placeholders is as cacheable as one in a stored procedure, because the same inputs produce the same text.
+
+How a database decides whether it needs to plan is simple. Turning a statement into an execution plan is called a **hard parse**: the optimizer inspects the whole text, considers every index and every join order, and spends real CPU doing it. Finding a cached plan for the same text and reusing it after a few checks, access rights for instance, is a **soft parse** and costs almost nothing. The cache key is the statement text, usually a hash of it. A statement with a literal value only hits the cache when the identical value comes around again, and by then the plan has often been pushed out by the stream of other one-off statements. The [glossary](/sql/glossary/) has the terms; the [bind parameters lesson](/sql/where-clause/bind-parameters/) has the mechanism.
+
+The slow case is the one the rule was meant to prevent, plus one it created. The static statement that handles every combination of optional filters looks like this:
+
+```sql
+SELECT *
+  FROM employees
+ WHERE (subsidiary_id = ? OR ? IS NULL)
+   AND (last_name = ? OR ? IS NULL)
+   AND (date_of_birth = ? OR ? IS NULL);
+```
+
+This is the smart-logic anti-pattern. The optimizer plans it once, without knowing which parameters will be null, and the plan has to work for every combination. No index can be relied on, because any of the conditions might be switched off, so the plan is a full table scan every time. [Unit 2 (the where clause)](/sql/where-clause/) has the full treatment of this query and why bind parameter peeking does not rescue it.
+
+## What to do instead
+
+Build the where clause at runtime, including only the conditions the user supplied, and pass the values as bind parameters. Three optional filters produce at most eight distinct statement texts, each of which gets its own plan and its own chance to use the right index. That is dynamic SQL, and it is the fast version.
+
+Doing this by hand means a few lines of string building per optional condition, with a `WHERE` or `AND` chosen depending on what came before, and a parallel list of parameter values. It works, and it generates exactly the statement the optimizer wants, but it is awkward to keep correct. The query builders of the ORM frameworks do the same job with less room for mistakes.
+
+```java
+// Hibernate Criteria API
+Criteria c = session.createCriteria(Employees.class);
+if (subsidiaryId != null) c.add(Restrictions.eq("subsidiaryId", subsidiaryId));
+if (employeeId   != null) c.add(Restrictions.eq("employeeId", employeeId));
+if (lastName     != null) c.add(Restrictions.eq("lastName", lastName).ignoreCase());
+```
+
+With only the last name supplied, Hibernate sends a statement whose where clause is `lower(last_name)=?`: one bind parameter, and the case-insensitive comparison implemented through `LOWER`. The `ilike` restriction does the same. That matters for indexing, because the [function-based index](/sql/where-clause/functions/case-insensitive-search/) for this query has to be on `LOWER(last_name)`, not on `UPPER(last_name)`, so you need to know which function the framework picks.
+
+```java
+// Java Persistence API, CriteriaBuilder
+List<Predicate> where = new ArrayList<>();
+if (lastName != null)
+  where.add(cb.equal(cb.upper(r.get(Employees_.lastName)), lastName.toUpperCase()));
+if (employeeId != null)
+  where.add(cb.equal(r.get(Employees_.employeeId), employeeId));
+query.where(where.toArray(new Predicate[0]));
+```
+
+JPA has no case-insensitive operator, so the conversion is explicit. It is more verbose, but you choose the function, which is better for indexing, and the metamodel (`Employees_`) gives compile-time type safety in return. The native Hibernate API also allows the explicit form.
+
+Other languages look alike. Perl's DBIx::Class takes a list of hash conditions, `'UPPER(last_name)' => uc($last_name)` among them, and emits `WHERE ( UPPER(last_name) = :p1 )`. PHP's Doctrine builds the condition with `$qb->expr()->eq('UPPER(e.last_name)', ':name')` and binds the value with `setParameter`; the generated statement ends in `WHERE UPPER(e0_.last_name) = ?`. In every case the text varies only with the *set* of conditions, and the values travel as parameters.
+
+Use the query builder of the ORM or framework rather than string concatenation, so placeholders and parameters stay in sync and injection is impossible. If the number of combinations grows, a few will dominate and the statement cache handles the rest.
+
+<Callout kind="warning" title="Prepare once, execute many">
+
+The fastest statement is parsed zero times. A `PreparedStatement` created before a loop and executed inside it is planned once, at prepare time; every execution afterwards skips parsing entirely.
+
+```java
+PreparedStatement ps = con.prepareStatement(
+  "SELECT first_name, last_name FROM employees WHERE UPPER(last_name) = ?");
+for (String name : names) {
+  ps.setString(1, name.toUpperCase());
+  try (ResultSet rs = ps.executeQuery()) { /* ... */ }
+}
+ps.close();
+```
+
+Converting such code to dynamic SQL tends to move the `prepareStatement` call into the loop. Now every iteration costs a soft parse and a network round trip, and if the statement always carries the same well-indexed condition, there was never a better plan to gain. The same trap exists in stored procedures: PL/SQL prepares its static SQL at compile time or once per run, and rewriting it as dynamic SQL can make it seriously slower.
+
+</Callout>
+
+That is also the one honest exception to the rule. A very cheap statement executed at very high frequency, where the parse is a measurable share of the total, can be faster as a single static statement, smart logic and all, than as a family of dynamic ones. It is rare, and it is measurable, so measure before assuming it.
+
+<Callout kind="note">There is a case where literal values beat bind parameters: a filter on a column with a badly skewed distribution, where the optimizer needs the actual value to pick between an index and a full scan. That is also dynamic SQL, and [Unit 2 (the where clause)](/sql/where-clause/) explains when it is worth it.</Callout>

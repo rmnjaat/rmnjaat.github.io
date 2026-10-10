@@ -1,0 +1,107 @@
+---
+title: System Load
+subtitle: The optimizer picks an index because it beats a table scan, not because it is the right one. Under production load, the difference between those two things is thirty seconds.
+chapter: testing-scalability
+order: 2
+kind: lesson
+minutes: 8
+summary: Why "the index is used" is not the end of the analysis, where each database hides its predicate information, what concurrent load does to a query with a filter predicate, and why plan inspection beats a benchmark.
+prereqs: "You should have read <a href='/sql/testing-scalability/data-volume/'>Data volume</a> and be able to tell an access predicate from a filter predicate in a plan."
+outcomes:
+  - Why the optimizer's choice of an index does not mean the index is optimal
+  - Where the predicate information hides in SQL Server, MySQL and PostgreSQL plans
+  - How a filter predicate that costs one second at rest costs thirty under concurrent load
+  - Why reading the plan tells you more than a quick benchmark, and what a stress test is still good for
+  - Why production hardware is often slower than the development machine
+recap:
+  - The optimizer uses an index when it is cheaper than a full table scan. That is a low bar, and clearing it says nothing about column order.
+  - Predicate information is often hidden, behind a hover tooltip in SQL Server or encoded in columns in MySQL. Go looking for it.
+  - Access rate is a scalability parameter like data volume. With 25 concurrent queries the filter predicate query took 32 seconds, thirty times its idle response time; the access predicate query stayed under two.
+  - Read the plan carefully and you learn more than a quick benchmark can tell you. A full stress test is worth doing, but it is expensive.
+  - Production infrastructure accumulates latencies that development does not have. Do not expect bigger hardware to make a suspicious query fast.
+source: https://use-the-index-luke.com/sql/testing-scalability/system-load
+---
+import { Callout, KeyIdea, Figure, Check, EngineTabs } from '@/components/mdx';
+
+Thinking about a multi-column index usually stops at the first plan that shows the index being used. That is too early. The optimizer did not choose the index because it is right for the query; it chose it because it is cheaper than reading the whole table, which is a low bar. The previous lesson showed how hard it is to see the wrong column order in a plan. This one shows what that mistake costs once the system is busy.
+
+## 1. "Used" is not "optimal"
+
+An index with the columns in the wrong order still beats a full table scan, so the optimizer takes it and the plan says so. The condition that the index cannot use as an access predicate becomes a filter predicate, and at low volume and no load the difference is invisible. Verifying that an index is the optimal one for a query means going past the operation name and finding the predicate information, which most tools do not put in front of you.
+
+## 2. Where the predicate information hides
+
+<EngineTabs>
+  <Fragment slot="sql-server">
+  Management Studio's graphical plan shows predicate information only as a tooltip: hover over the `Index Seek` operator and read the box. For the `scale_slow` plan of the previous lesson the tooltip lists `Seek Predicates` for `section` and a plain `Predicate` for `id2`. The plain `Predicate` is the filter. The text plan from `SET STATISTICS PROFILE ON` shows the same thing as `SEEK:(...)` against `WHERE:(...)`.
+
+  ```
+  |--Index Seek(OBJECT:scale_slow),
+     SEEK:(scale_data.section=2),
+     WHERE:(scale_data.id2=1234) ORDERED FORWARD)
+  ```
+  </Fragment>
+  <Fragment slot="mysql">
+  MySQL has no predicate section at all. The filter predicate has to be inferred from `key_len`, which says how many bytes of the index key were used to position the scan, from the number of constants in `ref`, and from `Using index condition` in `Extra`. The [MySQL execution plan reference](/sql/explain-plan/mysql/) walks through it.
+  </Fragment>
+  <Fragment slot="postgresql">
+  PostgreSQL puts every condition the index can evaluate into `Index Cond`, access and filter alike. Telling them apart means comparing the columns in `Index Cond` against the column order of the index definition. The [PostgreSQL execution plan reference](/sql/explain-plan/postgresql/) shows how.
+  </Fragment>
+  <Fragment slot="oracle">
+  Oracle prints a `Predicate Information` section under every plan with `access(...)` and `filter(...)` labels, as long as you ask for the full plan output. Many tools truncate it.
+  </Fragment>
+  <Fragment slot="db2">
+  Db2's `db2exfmt` output lists `START`, `STOP` and `SARG` predicates per operator. `START` and `STOP` bound the scan; a `SARG` is a filter applied to each entry.
+  </Fragment>
+</EngineTabs>
+
+Wherever it hides and however small it looks, the predicate information decides how a query behaves as the system grows. And a system does not only grow in data. It also grows in how often the data is asked for, and the access rate is another parameter of the scalability function.
+
+## 3. Response time under load
+
+The measurement from the previous lesson is now repeated with the data volume fixed at the largest section, so the last point of [Figure 3.2](/sql/testing-scalability/data-volume/) is the first point here, and the number of queries running concurrently is turned up from one to 25.
+
+<Figure n="3.3" title="Response time against concurrent load, data volume fixed at section 100">
+<table>
+  <thead><tr><th>Concurrent queries</th><th><code>scale_slow</code> (filter predicate)</th><th><code>scale_fast</code> (access predicates)</th></tr></thead>
+  <tbody>
+    <tr><td>1 (no background load)</td><td>about 1 s</td><td>well under 1 s</td></tr>
+    <tr><td>25</td><td>about 32 s</td><td>under 2 s</td></tr>
+  </tbody>
+</table>
+<p slot="caption">The filter predicate query slows down thirtyfold. The access predicate query barely notices.</p>
+</Figure>
+
+With `scale_slow`, the query that took about a second on an otherwise idle system takes up to 32 seconds when 25 copies of it run at once: thirty times longer than the figure a developer would see on a machine with no background load. With `scale_fast`, which has no filter predicate, the response time stays well under two seconds at the same load.
+
+<KeyIdea>Load multiplies the cost of every block a query touches. A filter predicate makes the query touch far more blocks than it returns, so load punishes it far more than it punishes a query whose scan is bounded by access predicates.</KeyIdea>
+
+This is why a full copy of the production database in the development environment is not enough. The data volume would match, but the background load would not, and the background load alone can turn one second into thirty.
+
+## 4. Plans over benchmarks
+
+<Callout kind="note">Read the plan carefully and you learn more than a quick benchmark can tell you. A full stress test is still worth doing, but it costs a great deal more.</Callout>
+
+The practical consequence is a change in what you measure. A timing on a development machine measures the cache and the absence of other users. The plan, and in particular its predicate information, measures the access path, and the access path is what load and volume multiply. If the plan shows a filter predicate on a column that could have been an access predicate, fix the index before anybody runs a benchmark; the benchmark cannot tell you anything the plan did not already say.
+
+A stress test under realistic data and realistic concurrency is the only way to get an actual number for production, and it is worth doing for the queries that matter. It is also expensive to set up, which is why plan inspection has to come first.
+
+## 5. Production hardware is not a safety net
+
+Suspicious response times tend to be waved through during development on the assumption that the "more powerful production hardware" will absorb them. It usually goes the other way. Production infrastructure is more complex than a developer's machine: the application and the database are on separate servers, there may be a firewall between them, there is a load balancer in front, and every hop adds latency that the development environment never had. Even when the test environment is a faithful copy of production, background load still makes the same query slower there. The [next lesson](/sql/testing-scalability/response-time-throughput-scaling-horizontal/) explains why bigger hardware is in general not something to expect faster single queries from.
+
+<Callout kind="warning" title="Common mistake">"It is a bit slow here, but production is a much bigger machine." Bigger production machines usually serve more users and sit behind more network hops. A query that is a bit slow on an idle laptop is the one most likely to be very slow there.</Callout>
+
+<Callout kind="note" title="Further reading">On latency in layered infrastructure: [Latency: Security vs. Performance](https://blog.fatalmind.com/2009/12/22/latency-security-vs-performance/). On the reflex of adding servers: James Golick, [We are experiencing too much load. Let's add a new server](https://jamesgolick.com/2010/10/27/we-are-experiencing-too-much-load-lets-add-a-new-server..html).</Callout>
+
+<Check
+  client:visible
+  question="A query takes one second on a full copy of the production data with nobody else connected. Under 25 concurrent copies of itself it takes 32 seconds. What is the most likely reason?"
+  options={[
+    'The production hardware is thirty times slower than the test machine.',
+    'The query has a filter predicate, so it touches far more index entries than it returns, and every one of those reads gets more expensive when the system is busy.',
+    'The optimizer switches to a full table scan when the system is busy.',
+  ]}
+  answer={1}
+  explain="The data and the plan are the same in both runs; only the load changed. Load raises the cost of each block read, and a filter predicate scan reads many more blocks than an access predicate scan. In the original measurement, the query with access predicates stayed under two seconds at the same load."
+/>

@@ -1,0 +1,141 @@
+---
+title: The B-Tree
+subtitle: Leaf nodes are scattered across the disk. The balanced search tree on top finds the right one in a handful of reads, no matter how big the table gets.
+chapter: anatomy
+order: 2
+minutes: 9
+summary: How the B-tree finds a leaf node in three or four reads, why it is balanced, what happens on insert, and why its depth barely grows with the number of rows.
+prereqs: "You should have read <a href='/sql/anatomy/the-leaf-nodes/'>The leaf nodes</a> and know what an index entry is: a key plus a pointer to the table row."
+outcomes:
+  - Why the sorted leaf nodes alone are not enough for a fast lookup
+  - How branch nodes and the root are built from the leaves
+  - How a lookup walks root → branch → leaf in a fixed number of reads
+  - What the database does on INSERT to keep the tree balanced
+  - Why that number barely grows when the table grows
+recap:
+  - Balanced does not mean binary. A B-tree node holds hundreds of keys, not two, so the tree stays shallow and every leaf is the same number of steps from the root.
+  - Each branch entry stores the largest key of the node below it. Lookups follow the first entry that is greater than or equal to the search key.
+  - A lookup costs root + branch + leaf reads, plus one table read for the row, and the number does not depend on the table size.
+  - Inserts walk the same path; a full leaf splits and promotes one key. The tree never degenerates.
+  - Depth grows logarithmically. Four or five levels cover millions of entries; six is rare.
+source: https://use-the-index-luke.com/sql/anatomy/the-tree
+---
+import { Callout, KeyIdea, Check, TryIt, BTree, LeafChain, Insert } from '@/components/mdx';
+
+The previous lesson left us with a problem. The leaf nodes hold the index entries in key order, and the doubly linked list keeps that order intact. But the leaves themselves sit on disk wherever there happened to be space when they were written. Logical order and physical order have nothing to do with each other.
+
+## 1. The problem the tree solves
+
+Think of a telephone directory whose pages were shuffled before binding. The entries on each page are still sorted, and each page still says which page comes next. But if you open the book in the middle and land on "Robinson", there is no reason to expect "Smith" on the following sheet. You could follow the page links until you get there. For a book with a million pages that is not a lookup, it is a scan.
+
+The figure below repeats Figure 1.1 from the previous lesson. Look at the bottom row this time, the disk order.
+
+<LeafChain client:visible n="1.3" title="Leaf nodes: logical order versus disk order" />
+
+The database needs a second structure that gets it to the right leaf without reading the ones before it: a **balanced search tree**, or B-tree for short.
+
+## 2. Building branch nodes and the root
+
+Start from the leaves. Take a group of neighbouring leaf nodes and write down the largest key stored in each one. Those keys, together with a pointer to the leaf they came from, form a **branch node**. Then do the same thing with the branch nodes, one level up, and keep going until a single node covers everything. That last node is the **root**.
+
+<BTree client:visible n="1.4" mode="structure" />
+
+The figure shows an index with 27 entries in nine leaf nodes. The highlighted branch node holds the values 46, 53, 57 and 83, one for each of the four leaves it covers, because those are the largest keys in those leaves. The root does the same for the three branch nodes.
+
+<KeyIdea>Because the tree is built in whole layers, every leaf is the same number of steps from the root. That is what **balanced** means, and it is why every lookup costs the same.</KeyIdea>
+
+<Callout kind="note">Balanced does not mean binary. A binary tree has two children per node and grows deep quickly; a B-tree node holds hundreds of keys, not two, so the tree stays shallow.</Callout>
+
+## 3. How a lookup works
+
+A lookup starts at the root. The database reads the root's entries in order until it finds the first one whose key is **greater than or equal to** the search key, then follows that entry's pointer one level down. It repeats the same comparison in the branch node, and again, until it reaches a leaf. In the leaf, it scans the entries for the ones that match. Step through a search for the key 57.
+
+<BTree client:visible n="1.5" mode="search" search={57} />
+
+Three node reads. If the table had a billion rows instead of twenty-seven, the tree would be two or three levels deeper, and the same search would take five or six reads. Nothing else changes.
+
+<Callout kind="important">The B-tree exists to get the database to the right leaf node quickly. That is the whole of its job, and it does it in a handful of reads on any table size.</Callout>
+
+The traversal is so cheap that it works almost instantly even on an enormous data set, for two reasons. First, the tree is balanced, so every key is the same number of steps away. Second, the depth grows logarithmically with the number of entries, which section 6 makes concrete.
+
+<Callout kind="note" title="Why the largest key">Storing the *largest* key of each child in the parent is what makes the "first entry ≥ search key" rule work. If a search key is larger than everything in a child, it cannot be in that child, so the parent's entry rules it out without reading it.</Callout>
+
+## 4. Worked example
+
+The same lookup as PostgreSQL reports it. Read the plan against the figure above: the index scan is the tree traversal and the index condition is the comparison applied at every level. Ask for `EXPLAIN (ANALYZE, BUFFERS)` and the output also counts the blocks that were read: a handful for the index plus one for the row.
+
+```sql
+SELECT first_name, last_name
+  FROM employees
+ WHERE employee_id = 57;
+```
+
+```
+Index Scan using employees_pk on employees
+  Index Cond: (employee_id = 57)
+```
+
+## 5. What happens on INSERT
+
+The database maintains the tree on its own. Every `INSERT`, `DELETE` and `UPDATE` that touches an indexed column also updates the index. A new entry travels the same path a lookup would and lands in the leaf it belongs to. When that leaf is full, the leaf splits in two and one key is pushed up into the branch node. Press play to insert the key 56.
+
+<Insert client:visible n="1.6" />
+
+Three leaves became four and the branch node gained an entry. Every index on the table does this for every insert, which is the write cost of indexing. [Unit 8](/sql/dml/) measures it.
+
+<KeyIdea title="Remember">A B-tree never "degenerates" and never needs a rebuild to stay balanced. Splits keep every leaf at the same depth, automatically, on every write.</KeyIdea>
+
+## 6. Why the depth barely grows
+
+A [logarithm](https://en.wikipedia.org/wiki/Logarithm) answers the question "to what power must the base be raised to get this number?" In a search tree the base is the number of entries per node and the exponent is the depth. The example index in Figure 1.4 holds up to four entries per node and is three levels deep, so it can hold 4<sup>3</sup> = 64 entries. Add one level and it holds 4<sup>4</sup> = 256. Every extra level multiplies the capacity by four, and turning that around, the depth needed for a given number of entries is log<sub>4</sub>(entries).
+
+| Tree depth | Index entries (4 entries per node, for illustration) |
+| --- | --- |
+| 3 | 64 |
+| 4 | 256 |
+| 5 | 1,024 |
+| 6 | 4,096 |
+| 7 | 16,384 |
+| 8 | 65,536 |
+| 9 | 262,144 |
+| 10 | 1,048,576 |
+
+Ten levels for a million entries is already good, and real indexes do far better, because the base is not four. The single biggest factor in tree depth, and therefore lookup speed, is how many entries fit in a node: the larger the base, the shallower the tree, the faster the traversal. Databases push this as far as it goes and fill each node, typically 8 KB, with as many entries as possible, often hundreds. Each new level then covers a hundred times more entries, not four times more. A depth of four or five is what you see in practice for tables with millions of rows; six is rare.
+
+This is **logarithmic scalability**: when the data grows by a factor of a hundred, the lookup gets a step or two slower. It is the reason indexing works at all, and it is the *first power of indexing*.
+
+<Callout kind="tip" title="See a B-tree grow">The [B+ tree visualisation](https://www.cs.usfca.edu/~galles/visualization/BPlusTree.html) from the University of San Francisco lets you insert keys one at a time and watch nodes split and the depth increase.</Callout>
+
+<Callout kind="warning" title="Common mistake">"The plan shows an index, so the query is fast." A fast tree walk only finds the first matching entry. What happens after that, following the leaf chain and fetching rows from the table, is where slow indexes come from. That is the next lesson.</Callout>
+
+## 7. Try it yourself
+
+SQLite stores its indexes as B-trees too, and because the playground runs a real SQLite database you can watch the planner use one. The primary key of `employees` is a B-tree on `(employee_id, subsidiary_id)`.
+
+<TryIt id="1.2" tasks={[
+  { text: 'Look up employee 57 in subsidiary 30 by its primary key and read the plan. The word <code>SEARCH</code> is the tree traversal.', sql: 'employee_id\\s*=\\s*57', plan: 'SEARCH' },
+  { text: 'Change the query to search by <code>last_name</code> only. The plan should now say <code>SCAN</code>. Why?', sql: 'last_name\\s*=', plan: '^SCAN' },
+  { text: 'Create an index on <code>last_name</code> and run the second query again.', sql: 'create\\s+index' },
+]} sql={`SELECT first_name, last_name
+  FROM employees
+ WHERE employee_id = 57
+   AND subsidiary_id = 30;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 2</summary><div class="d">No index has <code>last_name</code> as its first column, so there is no tree to walk. The only option is to read every row.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX emp&#95;name ON employees (last&#95;name);
+SELECT first&#95;name, last&#95;name FROM employees WHERE last&#95;name = 'Winand';
+-- plan: SEARCH employees USING INDEX emp&#95;name (last&#95;name=?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="An index grows from one million to one hundred million entries. Roughly how many more node reads does a single lookup need?"
+  options={[
+    'About a hundred times more. The data is a hundred times bigger.',
+    'One or two more. The tree gets one or two levels deeper.',
+    'None. The tree is balanced, so the cost never changes.',
+  ]}
+  answer={1}
+  explain="Each level multiplies capacity by the number of entries per node, which is in the hundreds. A hundredfold increase in entries adds one level, maybe two. The cost is logarithmic, not constant, and nowhere near linear."
+/>

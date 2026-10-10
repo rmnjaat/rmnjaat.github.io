@@ -1,0 +1,173 @@
+---
+title: Index Merge
+subtitle: One index per column sounds flexible. Combining them at query time costs two tree traversals and a merge, and one well-designed index beats that almost every time.
+chapter: where-clause
+order: 4.3
+kind: lesson
+minutes: 8
+summary: Why one concatenated index usually beats one index per column, why two independent range conditions cannot both be access predicates in a B-tree, what combining two indexes costs, and where bitmap indexes fit and where they do not.
+prereqs: "You should have read <a href='/sql/where-clause/the-equals-operator/concatenated-keys/'>Concatenated Keys</a> and the two previous lessons on range conditions."
+outcomes:
+  - Why a single multi-column index is usually the right answer
+  - Why no B-tree can serve two independent range conditions without a filter predicate
+  - What it costs to scan two indexes and combine the results
+  - What bitmap indexes are good for and why they are unusable for OLTP
+  - How the in-memory bitmap hybrid works and what it tells you about the index design
+recap:
+  - A concatenated index is better than one index per column in most cases.
+  - An index is a chain, not a chessboard. It can support only one range condition as an access predicate.
+  - If a filter predicate is unavoidable, put the more selective column first. That is the only case where the most-selective-first rule holds.
+  - Scanning one well-chosen index beats scanning two and merging the results, which costs a second traversal plus memory and CPU.
+  - Bitmap indexes combine easily but scale terribly for writes. The in-memory bitmap conversion that many databases do is an optimizer's last resort.
+source: https://use-the-index-luke.com/sql/where-clause/searching-for-ranges/index-merge-performance
+---
+import { Callout, KeyIdea, Figure, EngineTabs, Check, TryIt } from '@/components/mdx';
+
+One of the most common indexing questions is whether to create one index per column of the where clause or a single index over all of them. In most cases the answer is short: one index with several columns, a concatenated index, as described in [Concatenated Keys](/sql/where-clause/the-equals-operator/concatenated-keys/). This lesson is about the cases where that is not quite enough, and about what the alternative costs.
+
+## 1. Two independent range conditions
+
+There are queries no single index can serve perfectly, however you define it. Two or more independent range conditions are the typical case.
+
+```sql
+SELECT first_name, last_name, date_of_birth
+  FROM employees
+ WHERE UPPER(last_name) < ?
+   AND date_of_birth    < ?
+```
+
+No B-tree index can support this query without a filter predicate. To see why, remember that an index is a linked list. Define it as `UPPER(LAST_NAME), DATE_OF_BIRTH` and the list runs from A to Z; the date only orders employees who share a name. Define it the other way round and the list runs from the oldest employee to the youngest, with the name barely affecting the order.
+
+However you arrange it, the entries form one chain with small values at one end and large ones at the other. That chain can serve one range condition as an access predicate, and only one. Two independent ranges would need a second axis, like the squares of a chessboard, where the query would select everything from one corner. An index is not a chessboard. It is a chain, and a chain has no corner.
+
+<Figure n="2.8" title="A chain has one axis, a chessboard has two">
+
+```
+index (UPPER(last_name), date_of_birth)     what the query wants
+------------------------------------         --------------------
+ABEL     1962  <- scan starts                         date_of_birth
+ABEL     1988     name < ?  ok, date < ?  no          ^
+BAKER    1959     both ok                             |  . . . . .
+BAKER    1991     name ok, date no                    |  x x . . .
+CHEN     1960     name ok, date no  (name < 'C'?)     |  x x . . .
+...                                                   +----------> name
+```
+
+<p slot="caption">The index can stop at the first name that fails the name condition. Inside that range it must read every entry and test the date, because the date order is scattered along the chain.</p>
+</Figure>
+
+## 2. Accept the filter predicate
+
+The simplest option is to accept the filter predicate and use a multi-column index anyway. In many cases that is the best solution. The index should then start with the more selective column, so that the column with the better selectivity gets the access predicate and the other does the filtering.
+
+This may be where the "most selective first" myth came from. The rule is right only when a filter predicate cannot be avoided; whenever every condition can be an access predicate, the operators decide the column order, as the previous lessons showed.
+
+## 3. Two indexes and the cost of combining them
+
+The other option is two separate indexes, one per column. The database then scans both indexes and combines the intermediate results. That is more work on two counts. The lookup itself is done twice, with two tree traversals instead of one. And the merge needs a lot of memory and CPU time to match the two result sets against each other.
+
+<KeyIdea>Two traversals and a merge always cost more than one scan of the right index.</KeyIdea>
+
+Databases combine indexes in two ways. The first is an index join, using the join algorithms that [Unit 4](/sql/join/) explains. The second borrows a technique from data warehousing.
+
+## 4. Bitmap indexes
+
+A data warehouse is the home of the ad-hoc query. A few clicks combine any conditions into a new query, and nobody can predict which columns will turn up together in the where clause. Indexing as described so far, with a tailored index per query, becomes nearly impossible.
+
+Data warehouses use a special index type for this: the bitmap index. Its strength is that bitmap indexes can be combined cheaply, so indexing every column on its own gives acceptable performance for arbitrary combinations. If you do know the query in advance, a multi-column B-tree index made for it is still faster than combining several bitmap indexes.
+
+The great weakness of bitmap indexes is their write scalability. Insert, update and delete performance is dreadful, and concurrent writes are practically impossible. A warehouse does not mind, because its load jobs run one after another. That rules them out for most online applications.
+
+<Callout kind="important">Bitmap indexes do not survive concurrent writes, which rules them out for transactional (OLTP) tables.</Callout>
+
+Many databases offer a hybrid. When no better access path exists, they run several B-tree scans and convert each result into an in-memory bitmap. Those bitmaps are combined efficiently and thrown away after the statement, so the write scalability problem of persistent bitmap indexes never arises. The price is memory and CPU time. It is, in the end, an optimizer's act of desperation, and when you see it in the plan of a frequent query, that query is asking for a better index.
+
+<EngineTabs>
+  <Fragment slot="postgresql">
+  ```
+  Bitmap Heap Scan on employees
+    Recheck Cond: ((upper(last_name) < 'C') AND (date_of_birth < '1965-01-01'))
+    ->  BitmapAnd
+          ->  Bitmap Index Scan on emp_up_name
+                Index Cond: (upper(last_name) < 'C')
+          ->  Bitmap Index Scan on emp_dob
+                Index Cond: (date_of_birth < '1965-01-01')
+  ```
+  Each `Bitmap Index Scan` reads one index completely for its range and builds a bitmap; `BitmapAnd` intersects them before the table is touched.
+  </Fragment>
+  <Fragment slot="oracle">
+  ```
+  TABLE ACCESS BY INDEX ROWID      | EMPLOYEES
+    BITMAP CONVERSION TO ROWIDS    |
+      BITMAP AND                   |
+        BITMAP CONVERSION FROM ROWIDS
+          INDEX RANGE SCAN         | EMP_UP_NAME
+        BITMAP CONVERSION FROM ROWIDS
+          INDEX RANGE SCAN         | EMP_DOB
+  ```
+  `BITMAP CONVERSION FROM ROWIDS` is the in-memory bitmap built from an ordinary B-tree scan. Oracle also has persistent bitmap indexes, the data warehouse kind.
+  </Fragment>
+  <Fragment slot="sql-server">
+  ```
+  Hash Match (Inner Join)
+    Index Seek (emp_up_name)  SEEK: upper_name < 'C'
+    Index Seek (emp_dob)      SEEK: date_of_birth < '1965-01-01'
+  ```
+  SQL Server calls it index intersection: two seeks on the same table joined by a hash match on the row locator.
+  </Fragment>
+  <Fragment slot="mysql">
+  MySQL's Index Merge intersection only applies when every condition on a secondary index is an equality over all of its key parts; a range qualifies only on the InnoDB primary key. For the two range conditions above MySQL therefore picks one index and filters the other condition on the rows. An index on `UPPER(last_name)` would also need a functional key part, which exists only since 8.0.13. With two single-column indexes and two equalities, `subsidiary_id = 20 AND date_of_birth = '1971-01-09'`, the merge shows up:
+
+  ```
+  type: index_merge   key: emp_sub,emp_dob   Extra: Using intersect(emp_sub,emp_dob); Using where
+  ```
+
+  The `index_merge` access type with `Using intersect` means both indexes were scanned and their row sets intersected.
+  </Fragment>
+  <Fragment slot="db2">
+  ```
+        FETCH
+       /     \
+    IXAND    TABLE: EMPLOYEES
+    /    \
+  IXSCAN  IXSCAN
+  ```
+  Db2 calls it dynamic bitmap index ANDing; `IXAND` combines the two scans.
+  </Fragment>
+</EngineTabs>
+
+## 5. Try it
+
+SQLite never intersects two indexes for an `AND`. The playground has one index on `UPPER(last_name)` and one on `date_of_birth`, and the plan shows that only one of them is used while the other condition is filtered on the rows. The query matches 20 employees.
+
+<TryIt id="2.4.3" tasks={[
+  { text: 'Run the query. The plan uses a single index; the other condition does not appear.', sql: 'upper\\(last_name\\)\\s*<', plan: '^SEARCH employees USING INDEX emp_(up_name|dob) \\(' },
+  { text: 'Create a concatenated index <code>emp_up_dob</code> on <code>(UPPER(last_name), date_of_birth)</code> and run the query again. Only the first column shows up as an access predicate: <code>(&lt;expr&gt;&lt;?)</code>.', sql: 'create\\s+index\\s+emp_up_dob' },
+  { text: 'Change <code>AND</code> to <code>OR</code>. For a disjunction SQLite does combine the two single-column indexes; look for <code>MULTI-INDEX OR</code>.', sql: "upper\\(last_name\\)\\s*<\\s*'C'\\s+or", plan: 'MULTI-INDEX OR' },
+]} setup={`CREATE INDEX emp_up_name ON employees (UPPER(last_name)); CREATE INDEX emp_dob ON employees (date_of_birth); ANALYZE;`} sql={`SELECT first_name, last_name, date_of_birth
+  FROM employees
+ WHERE UPPER(last_name) < 'C'
+   AND date_of_birth    < '1965-01-01';`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 2</summary><div class="d">Two range conditions, one chain. The index can only stop at the first name that fails the name condition; every date inside that range has to be checked entry by entry.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX emp&#95;up&#95;dob ON employees (UPPER(last&#95;name), date&#95;of&#95;birth);
+SELECT first&#95;name, last&#95;name, date&#95;of&#95;birth FROM employees
+ WHERE UPPER(last&#95;name) &lt; 'C' AND date&#95;of&#95;birth &lt; '1965-01-01';
+-- plan: SEARCH employees USING INDEX emp&#95;up&#95;dob (&lt;expr&gt;&lt;?)
+SELECT first&#95;name, last&#95;name, date&#95;of&#95;birth FROM employees
+ WHERE UPPER(last&#95;name) &lt; 'C' OR date&#95;of&#95;birth &lt; '1965-01-01';
+-- plan: MULTI-INDEX OR ... emp&#95;up&#95;name ... emp&#95;dob</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="A query has WHERE last_name < ? AND date_of_birth < ?. Which statement is true?"
+  options={[
+    'An index on (last_name, date_of_birth) serves both conditions as access predicates.',
+    'No B-tree index can serve both conditions as access predicates; one of them is a filter whatever the column order.',
+    'Two single-column indexes are always faster than one concatenated index for this query.',
+  ]}
+  answer={1}
+  explain="An index is a chain with one sort order. Only one range condition can bound the scan; the second is checked entry by entry. A concatenated index led by the more selective column is usually the best compromise, and combining two indexes costs two traversals plus a merge."
+/>

@@ -1,0 +1,200 @@
+---
+title: PostgreSQL
+subtitle: How to get a plan with EXPLAIN, what Index Scan, Bitmap Heap Scan and Seq Scan mean, and how to tell an Index Cond from a Filter.
+section: explain-plan
+order: 1
+summary: Reading PostgreSQL execution plans for indexing work. EXPLAIN (ANALYZE, BUFFERS, SETTINGS), explaining statements with bind parameters, plan caching, the scan and join operators, Index Cond versus Filter, Rows Removed by Filter, Heap Fetches, and what the cost, rows, time and buffer numbers mean.
+source: https://use-the-index-luke.com/sql/explain-plan/postgresql/getting-an-execution-plan
+---
+import { Callout } from '@/components/mdx';
+
+## Getting an execution plan
+
+Put `EXPLAIN` in front of any statement to see the plan the optimizer chose without running the statement.
+
+```sql
+EXPLAIN
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name = 'Winand';
+```
+
+The plain form shows estimates only. For indexing work you want the query to actually run, so that the plan carries real row counts, timings and the number of 8 KB pages it touched.
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name = 'Winand';
+```
+
+`ANALYZE` executes the statement and reports actual numbers next to the estimates. `BUFFERS` adds a line per node with the pages it read from cache and from disk. In PostgreSQL 18 `BUFFERS` is on by default whenever `ANALYZE` is on; on older versions you have to ask for it. `SETTINGS` appends a line listing every configuration parameter that influences planning and is not at its default, `random_page_cost = '1.1'` for instance, which is the first thing to check when a plan from production does not match the plan from your laptop. `FORMAT JSON` (or `YAML`, `XML`) gives the same information in a machine-readable form, which is what graphical plan viewers consume.
+
+The simplest possible statement shows the shape of every plan line.
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS, SETTINGS) SELECT 1;
+```
+
+```
+Result  (cost=0.00..0.01 rows=1 width=4) (actual time=0.001..0.002 rows=1 loops=1)
+Settings: random_page_cost = '1.1'
+Planning Time: 0.032 ms
+Execution Time: 0.078 ms
+```
+
+`Result` is the node that produces a constant row. The two groups in parentheses are the estimate and, with `ANALYZE`, the measurement; `Planning Time` and `Execution Time` close the output.
+
+<Callout kind="warning" title="ANALYZE runs the statement">
+
+`EXPLAIN ANALYZE` on an `INSERT`, `UPDATE` or `DELETE` really modifies the table. Wrap it in a transaction and roll back:
+
+```sql
+BEGIN;
+EXPLAIN (ANALYZE, BUFFERS) DELETE FROM sales WHERE sale_date < '2024-02-01';
+ROLLBACK;
+```
+
+</Callout>
+
+For statements you cannot run by hand, the `auto_explain` extension logs the plan of every statement slower than a threshold, with the same `ANALYZE` and `BUFFERS` detail if you enable it.
+
+### Statements with bind parameters
+
+A statement that contains placeholders such as `$1` cannot be explained as it is, because `EXPLAIN` has no values to plan with. Prepare it first, then explain the `EXECUTE` with concrete values.
+
+```sql
+PREPARE emp_by_sub (int) AS
+SELECT first_name, last_name
+  FROM employees
+ WHERE subsidiary_id = $1;
+
+EXPLAIN (ANALYZE, BUFFERS) EXECUTE emp_by_sub (20);
+
+DEALLOCATE emp_by_sub;
+```
+
+Since PostgreSQL 9.2 the plan of a prepared statement is built when it is executed, so the planner sees the actual parameter values and the plan you get this way is the plan the application gets, including the difference between subsidiary 20 (half the table) and subsidiary 30 (a fifth). Only after several executions does the server consider switching to a generic plan that ignores the values. PostgreSQL 16 added the `GENERIC_PLAN` option so you can look at that generic plan directly, with the placeholders left in: `EXPLAIN (GENERIC_PLAN) SELECT ... WHERE subsidiary_id = $1`. Close prepared statements with `DEALLOCATE` when you are done; they live for the session. The [bind parameters lesson](/sql/where-clause/bind-parameters/) explains why the two plans can differ and the [smart logic lesson](/sql/where-clause/obfuscation/smart-logic/) shows the query shape where a generic plan is always wrong.
+
+### Where the plans are cached
+
+PostgreSQL has no shared plan cache across sessions. The only plan cache is the one attached to a prepared statement, it is optional, and it disappears when the statement is closed. Whether your application uses it is decided by the driver.
+
+In the JDBC driver, a `PreparedStatement` is sent with its parameter values for the first few executions, so each one is planned with concrete values; from the fifth execution of the same statement object on, the driver asks for a server-side prepare and the generic plan can take over. The non-standard `setPrepareThreshold` method on `PGStatement` and `PGConnection` changes that count, and the counter is per statement object, so a connection pool's prepared-statement cache (the `prepared-statement-cache-size` setting of most data sources) decides how often you cross the threshold. In libpq, `PQexecParams` sends values with the statement and plans with them; `PQprepare` creates the server-side prepared statement. The Ruby `pg` gem's `exec` takes the parameters as an optional argument and behaves like `PQexecParams`.
+
+## Operations
+
+A PostgreSQL plan is a tree printed with indentation. The deepest nodes run first and hand their rows to the node above them. These are the nodes that matter for indexing.
+
+| Operation | What it means |
+| --- | --- |
+| `Seq Scan` | Reads the whole table in storage order. The only option when no index fits, and often the better option when most rows are needed anyway. |
+| `Index Scan` | Walks the B-tree to the first matching entry, follows the leaf chain, and fetches each matching row from the table (the heap) as it goes. Used for unique lookups and for ranges alike; there is no separate unique-scan node. |
+| `Index Only Scan` | Same traversal, but all requested columns come from the index, so the table is not visited unless the visibility map says it must be. See `Heap Fetches` below. |
+| `Bitmap Index Scan` | Walks the index but instead of fetching rows immediately, collects the matching row locations into a bitmap. Always paired with a `Bitmap Heap Scan` above it. Two of them can be combined with `BitmapAnd` and `BitmapOr`. |
+| `Bitmap Heap Scan` | Reads the table pages marked in the bitmap, in physical order, which turns many random reads into fewer sequential ones. Prints a `Recheck Cond` because a bitmap that got too large degrades to page granularity and the condition must be re-evaluated on each row. |
+| `Nested Loop` | For each row from the outer (first) child, runs the inner (second) child. Good when the outer side is small and the inner side is an index lookup. |
+| `Hash Join` | Builds a hash table from the smaller input (the `Hash` node), then probes it with each row of the other input. Needs no index on the join columns, only on the where clause. |
+| `Merge Join` | Reads both inputs in join-key order and zips them together. Requires sorted inputs, from an index or from an explicit `Sort`. |
+| `Sort` | Sorts its input. The `Sort Method` line says whether it fit in memory (`quicksort`, `top-N heapsort`) or spilled (`external merge  Disk:`). |
+| `HashAggregate` | Grouping by hash table. Input order is irrelevant; output order is undefined. |
+| `GroupAggregate` | Grouping on sorted input, one group at a time. If the order comes from an index there is no `Sort` node and the first group is returned immediately. |
+| `Limit` | Stops pulling rows from its child after the requested count. Only cheap if the child can produce rows one at a time; a `Limit` above a `Sort` still sorts everything, although the `Sort` switches to `top-N heapsort` and keeps only the rows that can make it into the result. |
+| `WindowAgg` | Evaluates window functions such as `ROW_NUMBER()`. Since PostgreSQL 15 a `Run Condition` line on this node means a filter on the window function result, `rn <= 10` for instance, stops the node early instead of numbering every row. That is what makes the window-function form of a [top-N query](/sql/partial-results/window-functions/) pipelined. |
+| `Result` | Produces rows without reading a table: a constant `SELECT 1`, or a condition the planner evaluated to false (`One-Time Filter`). |
+
+## Access predicates and filter predicates
+
+The where clause of a query gets split across the plan. Part of it defines where the index scan starts and stops; that is the access predicate. The rest is checked against every row the scan produces; that is the filter predicate. PostgreSQL labels the two differently, mostly.
+
+Create a two-column index and run the query that uses both columns.
+
+```sql
+CREATE INDEX emp_sub_name ON employees (subsidiary_id, last_name);
+
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name = 'Winand';
+```
+
+```
+Index Scan using emp_sub_name on employees  (cost=0.28..8.30 rows=34 width=29) (actual time=0.021..0.044 rows=33 loops=1)
+  Index Cond: ((subsidiary_id = 20) AND (last_name = 'Winand'::text))
+  Buffers: shared hit=5
+Planning Time: 0.110 ms
+Execution Time: 0.072 ms
+```
+
+Both conditions appear in `Index Cond`. Since `subsidiary_id` is the first index column and has an equality condition, the condition on the second column narrows the scanned range as well. The scan reads 33 index entries and 33 rows, nothing more.
+
+Now drop the first condition.
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE last_name = 'Winand';
+```
+
+```
+Seq Scan on employees  (cost=0.00..21.50 rows=66 width=29) (actual time=0.012..0.160 rows=66 loops=1)
+  Filter: (last_name = 'Winand'::text)
+  Rows Removed by Filter: 934
+  Buffers: shared hit=9
+```
+
+The index is useless without a condition on its leading column, so the planner reads the table and applies the condition as a `Filter`. `Rows Removed by Filter` tells you how much of that work was wasted: 934 rows were read and thrown away to return 66.
+
+<Callout kind="important" title="Index Cond does not always mean access predicate">Sometimes the planner still chooses the index for the `last_name` query and prints `Index Cond: (last_name = 'Winand'::text)`. That is not a lookup. It is a scan over the entire index that compares each entry with the condition, and it costs about as much as a full table scan. PostgreSQL puts any condition on an index column into `Index Cond`, whether or not it limits the range. To tell the two apart, look at the index definition: a condition is an access predicate only if every index column before it also has an equality condition in the same `Index Cond`. PostgreSQL 18 adds a skip scan that can use the second column when the first has very few distinct values; the plan reports it through an `Index Searches` count greater than one.</Callout>
+
+The third case is a condition the index cannot narrow but can still evaluate.
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT first_name, last_name, phone_number
+  FROM employees
+ WHERE subsidiary_id = 20
+   AND last_name LIKE '%and';
+```
+
+```
+Index Scan using emp_sub_name on employees  (cost=0.28..14.80 rows=5 width=29) (actual time=0.030..0.210 rows=33 loops=1)
+  Index Cond: (subsidiary_id = 20)
+  Filter: (last_name ~~ '%and'::text)
+  Rows Removed by Filter: 467
+  Buffers: shared hit=12
+```
+
+A `LIKE` with a leading wildcard cannot define a range in a B-tree, so only `subsidiary_id = 20` is the access predicate. The scan visits all 500 entries of subsidiary 20, fetches all 500 rows, and discards 467 of them. The `~~` operator is how PostgreSQL spells `LIKE` internally. In a plain `Index Scan` the `Filter` is evaluated on the row fetched from the table, even when the column is in the index; only an `Index Only Scan` can reject the entry before the fetch.
+
+The index column does not even have to be behind a `LIKE` to end up as a filter. Suppose the index were `(subsidiary_id, last_name, first_name)` and the query asked for `subsidiary_id = 20 AND first_name = 'Markus'`. Both conditions land in `Index Cond`, because both columns are in the index, but the entries for subsidiary 20 are sorted by `last_name` first, so `first_name` cannot narrow the range: all 500 entries are visited and compared. Adding a column to an index behind a column that the query does not constrain buys nothing. The [data volume lesson](/sql/testing-scalability/data-volume/) measures how badly this scales.
+
+<Callout kind="warning" title="A filter on an index column is still a filter">A plan that says `Index Scan` with every where-clause column in `Index Cond` looks finished. If some of those columns are only filters, the query reads an index range that grows with the table and keeps working acceptably until the data volume or the load catches up with it. The rule is simple: whatever the plan does not prove to be an access predicate, treat as a filter.</Callout>
+
+With a bitmap scan the same split is spread over two nodes: the `Bitmap Index Scan` carries the `Index Cond`, the `Bitmap Heap Scan` above it carries the `Recheck Cond` and the `Filter`.
+
+```
+Bitmap Heap Scan on employees  (cost=5.20..21.75 rows=5 width=29)
+  Recheck Cond: (subsidiary_id = 20)
+  Filter: (last_name ~~ '%and'::text)
+  Rows Removed by Filter: 467
+  Heap Blocks: exact=9
+  ->  Bitmap Index Scan on emp_sub_name  (cost=0.00..5.18 rows=500 width=0)
+        Index Cond: (subsidiary_id = 20)
+```
+
+## Reading the numbers
+
+Every node prints two groups in parentheses. The first group is the estimate: `cost=0.28..8.30` is the startup cost before the first row and the total cost for all rows, in arbitrary units that are only comparable within one plan; `rows` is the number of rows the planner expects this node to return; `width` is the average row size in bytes. The second group, only with `ANALYZE`, is what happened: `actual time=0.021..0.044` in milliseconds for first and last row, `rows` actually returned, and `loops`, how often the node ran.
+
+`rows` is the only figure that appears in both groups, which is exactly why it is the comparison that pays off most. When estimated `rows` and actual `rows` differ by an order of magnitude the planner was working from wrong statistics or from a condition it cannot estimate, and the choice of index or join method rests on a guess. Run `ANALYZE employees;` and look again before changing anything else. If you are used to Oracle plans, note that PostgreSQL prints two cost figures where Oracle prints one; the second is the one that corresponds to Oracle's `Cost` column.
+
+<Callout kind="note" title="Numbers are per loop">Inside a `Nested Loop` the inner node runs once per outer row. Its `actual time` and `rows` are averages per execution. Multiply by `loops` to get the total.</Callout>
+
+`Buffers: shared hit=5` counts 8 KB pages found in the buffer cache; `read=` counts pages that came from the operating system or disk; `temp read`/`temp written` indicate sorts and hashes that spilled. Buffer counts are the most repeatable measure of work a plan does, because they do not change with cache state the way timings do. An index scan returning 33 rows that touches 5 pages is doing a lookup; one that touches 500 pages is doing a scan with a filter.
+
+Two more lines deserve a glance. `Heap Fetches` on an `Index Only Scan` says how many rows still needed a table visit; a large number means the visibility map is stale and `VACUUM` would help. `Sort Method: external merge  Disk: 4120kB` means the sort did not fit in `work_mem`; an index that delivers the order makes the `Sort` node disappear entirely.

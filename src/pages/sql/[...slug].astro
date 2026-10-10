@@ -1,0 +1,101 @@
+---
+import { getCollection, render } from 'astro:content';
+import Lesson from '../../layouts/Lesson.astro';
+import { chapters, referenceSections } from '../../lib/site';
+import { getOrderedLessons, toNavItem, getReferenceBySection, lessonHref } from '../../lib/nav';
+
+export async function getStaticPaths() {
+  const lessons = await getOrderedLessons();
+  const refs = await getCollection('reference');
+  const paths: { params: { slug: string }; props: Record<string, unknown> }[] = [];
+  lessons.forEach((entry, i) => {
+    paths.push({ params: { slug: entry.id }, props: { kind: 'lesson', entry, prev: lessons[i - 1] ?? null, next: lessons[i + 1] ?? null } });
+  });
+  for (const c of chapters) if (!lessons.some((l) => l.id === c.slug)) paths.push({ params: { slug: c.slug }, props: { kind: 'chapter', chapter: c } });
+  for (const r of refs) paths.push({ params: { slug: r.id }, props: { kind: 'reference', entry: r } });
+  for (const s of referenceSections) if (!refs.some((r) => r.id === s.slug)) paths.push({ params: { slug: s.slug }, props: { kind: 'section', section: s } });
+  return paths;
+}
+
+const props = Astro.props as any;
+const kind: 'lesson' | 'chapter' | 'reference' | 'section' = props.kind;
+const sectionCurrent = (slug: string) => (slug === 'explain-plan' ? 'plans' : slug === 'glossary' ? 'glossary' : 'course');
+
+let Content: any = null;
+let headings: any[] = [];
+let layoutProps: any;
+
+if (kind === 'lesson') {
+  const { entry, prev, next } = props;
+  const r = await render(entry);
+  Content = r.Content; headings = r.headings;
+  const ch = chapters.find((c) => c.slug === entry.data.chapter)!;
+  const unit = (await getOrderedLessons()).filter((l) => l.data.chapter === ch.slug).map((l) => ({ id: l.id }));
+  layoutProps = {
+    id: entry.id, title: entry.data.title, subtitle: entry.data.subtitle, description: entry.data.summary,
+    crumbs: [{ href: '/', title: 'Course' }, { href: `/sql/${ch.slug}/`, title: `Unit ${ch.n} · ${ch.title}` }],
+    chapterSlug: ch.slug, kind: entry.data.kind, minutes: entry.data.minutes, prereqs: entry.data.prereqs, outcomes: entry.data.outcomes, recap: entry.data.recap, source: entry.data.source,
+    prev: prev ? { href: lessonHref(prev.id), title: prev.data.title } : undefined,
+    next: next ? { href: lessonHref(next.id), title: next.data.title } : undefined,
+    current: entry.data.kind === 'practice' || entry.data.kind === 'quiz' ? 'practice' : 'course', unitItems: unit,
+  };
+} else if (kind === 'reference') {
+  const { entry } = props;
+  const r = await render(entry);
+  Content = r.Content; headings = r.headings;
+  const sec = referenceSections.find((s) => s.slug === entry.data.section)!;
+  const list = (await getReferenceBySection()).get(sec.slug) ?? [];
+  const i = list.findIndex((x) => x.id === entry.id);
+  const prev = list[i - 1]; const next = list[i + 1];
+  const isSectionRoot = entry.id === sec.slug;
+  layoutProps = {
+    id: entry.id, title: entry.data.title, subtitle: entry.data.subtitle, description: entry.data.summary,
+    crumbs: isSectionRoot ? [{ href: '/', title: 'Course' }, { href: '/sql/', title: 'Reference' }] : [{ href: '/', title: 'Course' }, { href: `/sql/${sec.slug}/`, title: sec.title }],
+    chapterSlug: sec.slug, kind: 'reference', trackable: false, source: entry.data.source,
+    prev: prev ? { href: lessonHref(prev.id), title: prev.data.title } : undefined,
+    next: next ? { href: lessonHref(next.id), title: next.data.title } : undefined,
+    current: sectionCurrent(sec.slug),
+  };
+} else if (kind === 'chapter') {
+  const ch = props.chapter;
+  const list = (await getOrderedLessons()).filter((l) => l.data.chapter === ch.slug).map(toNavItem);
+  layoutProps = { id: ch.slug, title: `Unit ${ch.n} · ${ch.title}`, subtitle: ch.tagline, description: ch.intro, crumbs: [{ href: '/', title: 'Course' }], chapterSlug: ch.slug, kind: 'index', current: 'course', trackable: false };
+  props.list = list; props.total = list.reduce((s: number, l: any) => s + (l.minutes ?? 0), 0);
+} else {
+  const sec = props.section;
+  const list = ((await getReferenceBySection()).get(sec.slug) ?? []).map((r) => ({ href: lessonHref(r.id), title: r.data.title, subtitle: r.data.subtitle }));
+  layoutProps = { id: sec.slug, title: sec.title, subtitle: sec.tagline, description: sec.intro, crumbs: [{ href: '/', title: 'Course' }, { href: '/sql/', title: 'Reference' }], chapterSlug: sec.slug, kind: 'index', trackable: false, current: sectionCurrent(sec.slug) };
+  props.list = list;
+}
+---
+<Lesson {...layoutProps} headings={headings}>
+  {Content && <Content />}
+  {kind === 'chapter' && (
+    <>
+      <p class="chapter-intro">{props.chapter.intro}</p>
+      <ol class="lesson-list" data-lesson-list>
+        {props.list.map((l: any) => (
+          <li data-depth={String(l.depth)} data-id={l.id} class={`t-${l.kind}`}>
+            <a href={l.href}><span class="ic" aria-hidden="true"></span><span><span class="t">{l.title}</span><span class="sub">{l.subtitle}</span></span><span class="min">{l.kind === 'lesson' ? `${l.minutes} min` : `${l.kind} · ${l.minutes} min`}</span></a>
+          </li>
+        ))}
+      </ol>
+      <p style="color: var(--mute); font-size: 14px; margin-top: var(--s2)">{props.list.length} items · about {props.total} minutes</p>
+    </>
+  )}
+  {kind === 'section' && (
+    <>
+      {props.section.intro && <p class="chapter-intro">{props.section.intro}</p>}
+      <ol class="lesson-list">
+        {props.list.map((l: any) => (
+          <li data-depth="1" class="t-lesson"><a href={l.href}><span class="ic" style="border:0"></span><span><span class="t">{l.title}</span><span class="sub">{l.subtitle}</span></span><span></span></a></li>
+        ))}
+      </ol>
+    </>
+  )}
+</Lesson>
+<script>
+  import { getDone } from '../../lib/prefs';
+  const done = getDone();
+  document.querySelectorAll<HTMLElement>('[data-lesson-list] li[data-id]').forEach((li) => li.classList.toggle('done', done.has(li.dataset.id!)));
+</script>

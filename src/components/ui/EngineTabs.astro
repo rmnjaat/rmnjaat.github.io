@@ -1,0 +1,46 @@
+---
+/**
+ * Vendor-specific content. Use named slots, one per engine:
+ * <EngineTabs>
+ *   <Fragment slot="postgresql">...</Fragment>
+ *   <Fragment slot="mysql">...</Fragment>
+ * </EngineTabs>
+ * The tab matching the reader's chosen engine (header picker) opens first.
+ */
+import { engines } from '../../lib/site';
+const present = engines.filter((e) => Astro.slots.has(e.id));
+const uid = Math.random().toString(36).slice(2, 8);
+---
+<div class="engine-tabs" data-engine-tabs>
+  <div class="tabs" role="tablist" aria-label="Database">
+    {present.map((e, i) => (
+      <button type="button" role="tab" id={`tab-${uid}-${e.id}`} aria-controls={`panel-${uid}-${e.id}`} aria-selected={i === 0 ? 'true' : 'false'} data-engine={e.id}>{e.label}</button>
+    ))}
+  </div>
+  {present.map((e, i) => (
+    <div class="panel prose" role="tabpanel" id={`panel-${uid}-${e.id}`} aria-labelledby={`tab-${uid}-${e.id}`} data-engine={e.id} hidden={i !== 0}>
+      {e.id === 'postgresql' && <slot name="postgresql" />}
+      {e.id === 'mysql' && <slot name="mysql" />}
+      {e.id === 'oracle' && <slot name="oracle" />}
+      {e.id === 'sql-server' && <slot name="sql-server" />}
+      {e.id === 'db2' && <slot name="db2" />}
+      {e.id === 'sqlite' && <slot name="sqlite" />}
+    </div>
+  ))}
+</div>
+<script>
+  import { getEngine, setEngine } from '../../lib/prefs';
+  const groups = document.querySelectorAll<HTMLElement>('[data-engine-tabs]');
+  const show = (g: HTMLElement, id: string) => {
+    const tabs = g.querySelectorAll<HTMLButtonElement>('[role=tab]');
+    const has = [...tabs].some((t) => t.dataset.engine === id);
+    const target = has ? id : tabs[0]?.dataset.engine;
+    tabs.forEach((t) => t.setAttribute('aria-selected', t.dataset.engine === target ? 'true' : 'false'));
+    g.querySelectorAll<HTMLElement>('[role=tabpanel]').forEach((p) => { p.hidden = p.dataset.engine !== target; });
+  };
+  groups.forEach((g) => {
+    show(g, getEngine());
+    g.querySelectorAll<HTMLButtonElement>('[role=tab]').forEach((t) => t.addEventListener('click', () => setEngine(t.dataset.engine!)));
+  });
+  window.addEventListener('util:engine', (ev) => { const id = (ev as CustomEvent<string>).detail; groups.forEach((g) => show(g, id)); });
+</script>

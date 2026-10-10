@@ -1,0 +1,83 @@
+---
+title: The 3-minute quiz
+subtitle: Five query-and-index situations. Answer them before you start and the score tells you which unit to open first.
+section: about
+order: 1
+summary: A five-question placement quiz on SQL indexing, each question a realistic query with an index to judge, with explanations, followed by a guide from score to starting unit.
+source: https://use-the-index-luke.com/3-minute-quiz
+---
+import { Check } from '@/components/mdx';
+
+The original site has a three-minute quiz that most people fail, and the author's point in publishing the results was not that developers are careless but that SQL performance is taught as folklore. The five questions below are this site's own, written against the [example schema](/sql/example-schema/). Each shows an index and a query; decide whether the pair works. The explanations are short because the lessons are not.
+
+<Check
+  client:visible
+  question="There is an index on sales (sale_date). The report asks for last year's sales: WHERE EXTRACT(YEAR FROM sale_date) = 2024. Is the index a good fit for this query?"
+  options={[
+    'Good fit. sale_date is the only column in the condition and it is the only column in the index.',
+    'Bad fit. The condition is on a function of the column, not on the column, so the index cannot be searched.',
+    'Good fit, as long as statistics are current.',
+  ]}
+  answer={1}
+  explain="The index is sorted by sale_date, not by the year that a function computes from it. A B-tree can only be entered with a value of the indexed expression, so the database scans. Rewrite the condition as a range, sale_date >= DATE '2024-01-01' AND sale_date < DATE '2025-01-01', or index the expression itself. Unit 2, Obfuscated conditions: Dates."
+/>
+
+<Check
+  client:visible
+  question="Two queries run all day: one by subsidiary_id alone, one by subsidiary_id and last_name. A single index should serve both. Which column order is right?"
+  options={[
+    '(last_name, subsidiary_id): last_name has fifteen distinct values and subsidiary_id only three, so the more selective column goes first.',
+    '(subsidiary_id, last_name): the column that every query filters on must come first, selectivity is irrelevant here.',
+    'Either order. A concatenated index can be searched by any subset of its columns.',
+  ]}
+  answer={1}
+  explain="The index is sorted by its first column; the second only orders entries within equal first values. A query that filters on subsidiary_id alone can use (subsidiary_id, last_name) but not (last_name, subsidiary_id), where the entries it needs are spread over the whole index. The order is decided by the query with fewer conditions. Unit 2, Concatenated keys, and the myth directory entry Most Selective First."
+/>
+
+<Check
+  client:visible
+  question="An index exists on employees (last_name). The search screen runs WHERE last_name LIKE '%and%' so that users can type any part of a name. Does the index help?"
+  options={[
+    'Yes. LIKE is a comparison on the indexed column and the database walks the index.',
+    'Yes, but only the first few rows come back quickly.',
+    'No. A pattern that starts with a wildcard has no leading characters to find in the tree, so every entry has to be checked.',
+  ]}
+  answer={2}
+  explain="A B-tree can narrow the scan only up to the first wildcard. LIKE 'Win%' becomes a range from Win to Wio; LIKE '%and%' has nothing before the wildcard, so the whole index or table is read and the pattern is applied as a filter. Needing substring search means needing a different tool: a full-text index or a trigram index. Unit 2, Searching for ranges: Indexing LIKE filters."
+/>
+
+<Check
+  client:visible
+  question="A dashboard shows the ten most recent sales: ORDER BY sale_date DESC FETCH FIRST 10 ROWS ONLY, with no where clause. There is an index on sales (sale_date). Can the database answer this without reading the whole table?"
+  options={[
+    'No. ORDER BY always sorts, and sorting needs every row before the first one can be returned.',
+    'Yes. The index already holds the rows in sale_date order, so it reads the last ten leaf entries, backwards, and stops.',
+    'Only if the index was created with DESC.',
+  ]}
+  answer={1}
+  explain="An index is a sorted structure, and leaf nodes are linked in both directions, so a descending walk from the end of the index delivers rows in the required order without a sort. The limit stops the walk after ten entries. If the plan shows a Sort operation under the limit, the index is not being used for the order and the whole table is read. Unit 6, Indexed ORDER BY, and Unit 7, Top-N queries."
+/>
+
+<Check
+  client:visible
+  question="A query SELECT sale_date, eur_value FROM sales WHERE employee_id = ? AND subsidiary_id = ? runs very fast from an index on (employee_id, subsidiary_id, sale_date, eur_value). A colleague adds product_id to the select list. What happens to its performance?"
+  options={[
+    'Nothing measurable. One more column per row is a few bytes.',
+    'It gets slower, possibly a lot slower: the query was answered from the index alone, and the new column forces a table access for every matching row.',
+    'It gets faster, because the optimizer now has more information.',
+  ]}
+  answer={1}
+  explain="The original query was an index-only scan: every column it needed was in the index, so the table was never touched. One column outside the index ends that, and each matching entry now costs an extra block read from the table. For an employee with many sales the difference is an order of magnitude or more. Unit 5, Index-only scan, and the myth directory entry SELECT * Is Bad."
+/>
+
+## Where to start
+
+Count the questions you got right the first time, not after reading the explanation.
+
+**Zero or one.** Start at the beginning. [Unit 1](/sql/anatomy/) is three lessons on what an index physically is, and everything else depends on that picture. Then read [Unit 2](/sql/where-clause/) in order; it is the longest unit and the one that fixes most slow queries.
+
+**Two or three.** You know that indexes exist and roughly how they are used; the gaps are in the where clause. Skim [Unit 1](/sql/anatomy/), then read [Unit 2](/sql/where-clause/) carefully, especially the lessons on [concatenated keys](/sql/where-clause/the-equals-operator/concatenated-keys/), [ranges](/sql/where-clause/searching-for-ranges/) and [obfuscated conditions](/sql/where-clause/obfuscation/). Read [Unit 3](/sql/testing-scalability/) to understand why your test database did not warn you.
+
+**Four.** The where clause is in good shape. Go to [Unit 4](/sql/join/), [Unit 5](/sql/clustering/), [Unit 6](/sql/sorting-grouping/) and [Unit 7](/sql/partial-results/), which are about the second and third things an index can do beyond finding rows: avoiding the table, and delivering order. The question you missed points at the unit to start with.
+
+**Five.** Read [Unit 8](/sql/dml/) for the cost side of indexing, then use the [execution plan reference](/sql/explain-plan/) for your engine and the [myth directory](/sql/myth-directory/) as a checklist against advice you will hear from others. The unit checks at the end of each unit are a faster way through the material than the lessons.

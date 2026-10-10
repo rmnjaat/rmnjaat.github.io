@@ -1,0 +1,326 @@
+---
+title: Example Schema
+subtitle: Two tables, employees and sales, with deliberately uneven data. Every query in the book and every playground runs against them.
+section: example-schema
+order: 0
+summary: The employees and sales tables used in every example, their columns, keys and row counts, why the data is skewed on purpose, the DDL for SQLite, PostgreSQL, MySQL, Oracle, SQL Server and Db2, how to load the data on a server, and how the book's own, larger scripts differ.
+source: https://use-the-index-luke.com/sql/example-schema
+---
+import { Callout, EngineTabs } from '@/components/mdx';
+
+The book uses one small schema throughout, so that a plan or a timing from one chapter can be compared with the next. It is a company with three subsidiaries, a thousand employees, and twenty thousand sales. The playground on every lesson loads exactly this schema, from the same `schema.sql` file, into a SQLite database in your browser.
+
+The tables have the same names and columns as in the original book, but the data does not. The original scripts build 10,000 employees in 30 subsidiaries and generate sales for a subset of them, over a million rows in some chapters, because they are meant to be run on a server and to make slow plans visibly slow. This site keeps the volume small enough to run in a browser tab. Row counts quoted in lessons refer to the data described here; the [last section](#the-books-own-scripts) describes the original volumes so that you can relate them.
+
+## employees
+
+One row per employee. The primary key has two columns, because employee numbers are assigned per subsidiary and only the combination is unique. That is a deliberate complication: it makes the primary key a concatenated index, and several lessons in [Unit 2 (the where clause)](/sql/where-clause/) depend on it.
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `employee_id` | integer, not null | Employee number, 1 to 1,000. Unique only together with `subsidiary_id`. |
+| `subsidiary_id` | integer, not null | The subsidiary the employee works for: 10, 20 or 30. |
+| `first_name` | text, not null | One of 12 first names. |
+| `last_name` | text, not null | One of 15 last names. |
+| `date_of_birth` | date, not null | Between 1960 and 1999. Every employee has a different one. |
+| `phone_number` | text, not null | Unique, in the form `+43 1 nnn nnnn`. |
+
+Primary key: `(employee_id, subsidiary_id)`. No other index. 1,000 rows.
+
+The employees are not spread evenly over the subsidiaries:
+
+| `subsidiary_id` | Employees | Share |
+| --- | --- | --- |
+| 10 | 300 | 30 percent |
+| 20 | 500 | 50 percent |
+| 30 | 200 | 20 percent |
+
+## sales
+
+One row per sale, twenty per employee. The `employee_id` and `subsidiary_id` columns together identify the employee who made the sale, so a join to `employees` always needs both.
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `sale_id` | integer, primary key | 1 to 20,000, in insertion order. |
+| `employee_id` | integer, not null | The employee who made the sale. |
+| `subsidiary_id` | integer, not null | The employee's subsidiary, copied from `employees`. |
+| `sale_date` | date, not null | 640 distinct days between 2024-01-01 and 2025-10-01, about 31 sales per day. |
+| `eur_value` | decimal, not null | Between 9.90 and 909.80. |
+| `product_id` | integer, not null | 1 to 300. |
+| `quantity` | integer, not null | 1 to 5. |
+
+Primary key: `(sale_id)`. No other index. 20,000 rows. Because each employee has the same number of sales, the sales follow the same split as the employees: 10,000 rows for subsidiary 20, 6,000 for subsidiary 10 and 4,000 for subsidiary 30.
+
+The SQLite version declares no foreign key, which keeps the browser database simple. The DDL for the server engines below declares `sales (employee_id, subsidiary_id)` as a foreign key to `employees`, which is how the [delete lesson](/sql/dml/delete/) expects it.
+
+## Why the data is skewed
+
+Real tables are never uniform, and the skew is where indexing gets interesting. A condition on `subsidiary_id = 30` matches a fifth of the employees; the same condition with 20 matches half. An index on `subsidiary_id` alone is a reasonable choice for one value and a poor one for the other, and the optimizer can only tell the difference if it knows the distribution and knows the value. That is the whole discussion of selectivity, statistics and bind parameters in [Unit 2 (the where clause)](/sql/where-clause/), and it needs data where the answer depends on the value.
+
+The dates are skewed the other way, almost flat: every day has about the same number of sales. That makes `sale_date` a good column for range conditions and for the [sorting](/sql/sorting-grouping/) and [paging](/sql/partial-results/) units, where the question is the order of the entries rather than how many match.
+
+<Callout kind="note">The playground runs `ANALYZE` after loading, so SQLite's planner has statistics for both tables. Plans you see there reflect the real distribution, not a guess.</Callout>
+
+## DDL
+
+The schema as the playground loads it. SQLite stores dates as ISO text, which sorts and compares correctly, and `INTEGER PRIMARY KEY` on `sales` makes `sale_id` an alias for the row id. The insert statements that generate the data are in `public/schema.sql`.
+
+```sql
+CREATE TABLE employees (
+  employee_id   INTEGER NOT NULL,
+  subsidiary_id INTEGER NOT NULL,
+  first_name    TEXT    NOT NULL,
+  last_name     TEXT    NOT NULL,
+  date_of_birth TEXT    NOT NULL,
+  phone_number  TEXT    NOT NULL,
+  PRIMARY KEY (employee_id, subsidiary_id)
+);
+
+CREATE TABLE sales (
+  sale_id       INTEGER PRIMARY KEY,
+  employee_id   INTEGER NOT NULL,
+  subsidiary_id INTEGER NOT NULL,
+  sale_date     TEXT    NOT NULL,
+  eur_value     REAL    NOT NULL,
+  product_id    INTEGER NOT NULL,
+  quantity      INTEGER NOT NULL
+);
+```
+
+The same tables with native types and a foreign key, for running the examples on a server.
+
+<EngineTabs>
+  <Fragment slot="postgresql">
+  ```sql
+  CREATE TABLE employees (
+    employee_id   INTEGER      NOT NULL,
+    subsidiary_id INTEGER      NOT NULL,
+    first_name    VARCHAR(255) NOT NULL,
+    last_name     VARCHAR(255) NOT NULL,
+    date_of_birth DATE         NOT NULL,
+    phone_number  VARCHAR(255) NOT NULL,
+    CONSTRAINT employees_pk PRIMARY KEY (employee_id, subsidiary_id)
+  );
+
+  CREATE TABLE sales (
+    sale_id       INTEGER       NOT NULL,
+    employee_id   INTEGER       NOT NULL,
+    subsidiary_id INTEGER       NOT NULL,
+    sale_date     DATE          NOT NULL,
+    eur_value     NUMERIC(10,2) NOT NULL,
+    product_id    INTEGER       NOT NULL,
+    quantity      INTEGER       NOT NULL,
+    CONSTRAINT sales_pk PRIMARY KEY (sale_id),
+    CONSTRAINT sales_employees_fk FOREIGN KEY (employee_id, subsidiary_id)
+      REFERENCES employees (employee_id, subsidiary_id)
+  );
+  ```
+  </Fragment>
+  <Fragment slot="mysql">
+  ```sql
+  CREATE TABLE employees (
+    employee_id   INT          NOT NULL,
+    subsidiary_id INT          NOT NULL,
+    first_name    VARCHAR(255) NOT NULL,
+    last_name     VARCHAR(255) NOT NULL,
+    date_of_birth DATE         NOT NULL,
+    phone_number  VARCHAR(255) NOT NULL,
+    CONSTRAINT employees_pk PRIMARY KEY (employee_id, subsidiary_id)
+  );
+
+  CREATE TABLE sales (
+    sale_id       INT           NOT NULL,
+    employee_id   INT           NOT NULL,
+    subsidiary_id INT           NOT NULL,
+    sale_date     DATE          NOT NULL,
+    eur_value     DECIMAL(10,2) NOT NULL,
+    product_id    INT           NOT NULL,
+    quantity      INT           NOT NULL,
+    CONSTRAINT sales_pk PRIMARY KEY (sale_id),
+    CONSTRAINT sales_employees_fk FOREIGN KEY (employee_id, subsidiary_id)
+      REFERENCES employees (employee_id, subsidiary_id)
+  );
+  ```
+  </Fragment>
+  <Fragment slot="oracle">
+  ```sql
+  CREATE TABLE employees (
+    employee_id   NUMBER        NOT NULL,
+    subsidiary_id NUMBER        NOT NULL,
+    first_name    VARCHAR2(255) NOT NULL,
+    last_name     VARCHAR2(255) NOT NULL,
+    date_of_birth DATE          NOT NULL,
+    phone_number  VARCHAR2(255) NOT NULL,
+    CONSTRAINT employees_pk PRIMARY KEY (employee_id, subsidiary_id)
+  );
+
+  CREATE TABLE sales (
+    sale_id       NUMBER        NOT NULL,
+    employee_id   NUMBER        NOT NULL,
+    subsidiary_id NUMBER        NOT NULL,
+    sale_date     DATE          NOT NULL,
+    eur_value     NUMBER(10,2)  NOT NULL,
+    product_id    NUMBER        NOT NULL,
+    quantity      NUMBER        NOT NULL,
+    CONSTRAINT sales_pk PRIMARY KEY (sale_id),
+    CONSTRAINT sales_employees_fk FOREIGN KEY (employee_id, subsidiary_id)
+      REFERENCES employees (employee_id, subsidiary_id)
+  );
+  ```
+  </Fragment>
+  <Fragment slot="sql-server">
+  ```sql
+  CREATE TABLE employees (
+    employee_id   INT          NOT NULL,
+    subsidiary_id INT          NOT NULL,
+    first_name    VARCHAR(255) NOT NULL,
+    last_name     VARCHAR(255) NOT NULL,
+    date_of_birth DATE         NOT NULL,
+    phone_number  VARCHAR(255) NOT NULL,
+    CONSTRAINT employees_pk PRIMARY KEY (employee_id, subsidiary_id)
+  );
+
+  CREATE TABLE sales (
+    sale_id       INT           NOT NULL,
+    employee_id   INT           NOT NULL,
+    subsidiary_id INT           NOT NULL,
+    sale_date     DATE          NOT NULL,
+    eur_value     DECIMAL(10,2) NOT NULL,
+    product_id    INT           NOT NULL,
+    quantity      INT           NOT NULL,
+    CONSTRAINT sales_pk PRIMARY KEY (sale_id),
+    CONSTRAINT sales_employees_fk FOREIGN KEY (employee_id, subsidiary_id)
+      REFERENCES employees (employee_id, subsidiary_id)
+  );
+  ```
+
+  SQL Server makes the primary key index clustered unless told otherwise. The book's scripts declare it `PRIMARY KEY NONCLUSTERED` so that the table stays a heap and the plans look like those of the other engines; the [index-organized table lesson](/sql/clustering/index-organized-clustered-index/) explains what changes when you leave the default.
+  </Fragment>
+  <Fragment slot="db2">
+  ```sql
+  CREATE TABLE employees (
+    employee_id   INTEGER      NOT NULL,
+    subsidiary_id INTEGER      NOT NULL,
+    first_name    VARCHAR(255) NOT NULL,
+    last_name     VARCHAR(255) NOT NULL,
+    date_of_birth DATE         NOT NULL,
+    phone_number  VARCHAR(255) NOT NULL,
+    CONSTRAINT employees_pk PRIMARY KEY (employee_id, subsidiary_id)
+  );
+
+  CREATE TABLE sales (
+    sale_id       INTEGER       NOT NULL,
+    employee_id   INTEGER       NOT NULL,
+    subsidiary_id INTEGER       NOT NULL,
+    sale_date     DATE          NOT NULL,
+    eur_value     DECIMAL(10,2) NOT NULL,
+    product_id    INTEGER       NOT NULL,
+    quantity      INTEGER       NOT NULL,
+    CONSTRAINT sales_pk PRIMARY KEY (sale_id),
+    CONSTRAINT sales_employees_fk FOREIGN KEY (employee_id, subsidiary_id)
+      REFERENCES employees (employee_id, subsidiary_id)
+  );
+  ```
+  </Fragment>
+</EngineTabs>
+
+A primary key creates an index in every one of these engines. The foreign key does not, so after loading data on a server, add an index on the foreign key columns, which the [delete lesson's](/sql/dml/delete/) warning about cascading deletes assumes; the `sales_emp (subsidiary_id, employee_id)` index the join unit creates serves. The playground does not have it unless a lesson's setup creates it.
+
+## Loading the data on a server
+
+The data generator in `public/schema.sql` is written for SQLite. The quickest way to get the identical rows into another engine is to let SQLite write them out as plain `INSERT` statements, which every engine accepts.
+
+```
+sqlite3 :memory: ".read public/schema.sql" ".mode insert employees" "SELECT * FROM employees" \
+  ".mode insert sales" "SELECT * FROM sales" > data.sql
+```
+
+Dates come out as `'1960-01-01'` strings, which the `DATE` columns above accept in all six engines. Run the DDL, then `data.sql`, then the statistics command of your engine (`VACUUM ANALYZE`, `ANALYZE TABLE`, `DBMS_STATS.GATHER_TABLE_STATS`, `UPDATE STATISTICS`, `RUNSTATS`, `ANALYZE`), because every plan in this book assumes the optimizer knows the distribution.
+
+If you would rather generate rows in the database, as the book's own scripts do, the only non-portable part is producing the numbers 1 to N. Each engine has an idiom for it; the `SELECT` that turns a number into an employee is the same everywhere.
+
+<EngineTabs>
+  <Fragment slot="postgresql">
+  ```sql
+  INSERT INTO employees
+  SELECT i, ... FROM generate_series(1, 1000) AS g(i);
+  ```
+
+  `generate_series` is a set-returning function; join it to itself or to `employees` to produce the `sales` rows. The book's scripts seed the random generator with `SELECT setseed(0)` so that reruns produce the same data.
+  </Fragment>
+  <Fragment slot="mysql">
+  ```sql
+  SET SESSION cte_max_recursion_depth = 20000;
+  INSERT INTO employees
+  WITH RECURSIVE n (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1000)
+  SELECT i, ... FROM n;
+  ```
+
+  Recursive common table expressions need MySQL 8.0, and the default recursion limit is 1,000, hence the session setting for the larger table. The book's scripts predate 8.0 and build the numbers with a chain of views instead: a 16-row `generator_16` combined with itself by `UNION ALL` and bit shifts into `generator_256`, `generator_4k` and `generator_64k`.
+  </Fragment>
+  <Fragment slot="oracle">
+  ```sql
+  INSERT INTO employees
+  SELECT LEVEL, ... FROM dual CONNECT BY LEVEL <= 1000;
+  ```
+
+  `CONNECT BY LEVEL` on `dual` is the classic Oracle row generator. The book's scripts fill the columns with `DBMS_RANDOM.STRING` and `DBMS_RANDOM.VALUE` and seed with `DBMS_RANDOM.SEED(0)`.
+  </Fragment>
+  <Fragment slot="sql-server">
+  ```sql
+  WITH n (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1000)
+  INSERT INTO employees
+  SELECT i, ... FROM n OPTION (MAXRECURSION 0);
+  ```
+
+  The recursion limit defaults to 100 and `MAXRECURSION 0` removes it; the book's scripts set it to the exact row count instead. Because user-defined functions must be deterministic, the scripts reach `RAND()` through a view (`rand_helper`) from inside their `random_string`, `random_date` and `random_int` helpers.
+  </Fragment>
+  <Fragment slot="db2">
+  ```sql
+  INSERT INTO employees
+  WITH n (i) AS (SELECT 1 FROM sysibm.sysdummy1 UNION ALL SELECT i + 1 FROM n WHERE i < 1000)
+  SELECT i, ... FROM n;
+  ```
+
+  Db2 warns about a recursive query without a depth limit (SQL0347W); the `WHERE i < 1000` is that limit. Finish with `RUNSTATS ON TABLE employees`; before Db2 10 the table name must be schema-qualified.
+  </Fragment>
+  <Fragment slot="sqlite">
+  ```sql
+  WITH RECURSIVE n (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1000)
+  INSERT INTO employees
+  SELECT i, ... FROM n;
+  ```
+
+  This is the form `public/schema.sql` uses, with `CASE` expressions on `i` instead of random values so that every playground gets the same rows. The book's SQLite scripts use the same chain of generator views as the MySQL ones, because they predate recursive CTEs in SQLite.
+  </Fragment>
+</EngineTabs>
+
+The book also has scripts for Gupta SQLBase, which has no row generator of its own. They create a 16-row table of digits and combine it through views into 256, 4,096 and 65,536 rows, the same trick as the pre-8.0 MySQL scripts, and refresh statistics with `UPDATE STATISTICS ON TABLE` and `UPDATE STATISTICS ON INDEX`.
+
+## The book's own scripts
+
+The original appendix is not one schema file but a set of ready-to-run scripts, one page per engine and chapter, that build the tables each chapter needs and run the chapter's experiments. They were written for PostgreSQL 9.0, MySQL 5.1, Oracle 11gR2 (most also work on 10g), SQL Server 2008 R2, Db2 (LUW) 9.7 to 11.5, SQLite, and SQLBase 11.7. Not every chapter exists for every engine:
+
+| Chapter scripts | PostgreSQL | MySQL | Oracle | SQL Server | Db2 | SQLite | SQLBase |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| The Where Clause | yes | yes | yes | yes | yes | yes | yes |
+| Testing and Scalability | yes | | yes | yes | yes | | |
+| The Join Operation | yes | yes | yes | yes | yes | yes | yes |
+| Clustering Data | | yes | yes | yes | | | |
+| Sorting and Grouping | yes | yes | yes | yes | | | |
+| Partial Results | yes | yes | yes | yes | | | |
+| Insert, Delete and Update | yes | | yes | yes | | | |
+| 3-Minute Quiz | yes | yes | yes | yes | yes | yes | |
+
+What those scripts build, in the order the book uses it:
+
+- **employees**, first with 1,000 rows and a single-column primary key, for the surrogate key lesson. The columns are the ones above plus a `junk` column (`CHAR(1000)` in most engines, `CHAR(255)` in MySQL and SQLite, `CHAR(254)` in Db2 and SQLBase) that pads each row to a realistic size, and `date_of_birth` is nullable. Employee 123 is updated to the author's name so that the lessons have a row to search for. For the concatenated key lesson a `subsidiary_id` column is added, the existing rows are assigned to subsidiary 30, 9,000 more rows are spread over subsidiaries 1 to 29, and the primary key is rebuilt as `(employee_id, subsidiary_id)` and later as `(subsidiary_id, employee_id)`. The reordering steps differ per engine: PostgreSQL and SQL Server swap in a temporary unique index so the table is never without a key, Oracle 11g needs a dummy third column because two indexes on the same columns are not allowed before 12c, Db2 needs a `REORG TABLE` between dropping and re-adding the key, and SQLite has to drop and recreate the table.
+- **sales**, generated from `employees` for roughly one employee in seven (`MOD(employee_id, 7) = 4`), with about `employee_id / 5` sales each over the last ten years, Sundays removed, and a `junk CHAR(200)` column. In PostgreSQL that comes to about 1.2 million rows. The foreign key references `(subsidiary_id, employee_id)`.
+- **scale_data** for the scalability chapter: columns `section`, `id1`, `id2`, with 3,000 rows per section number, so that 300 sections hold about 135 million rows. Two indexes, `scale_slow (section, id1, id2)` and `scale_fast (section, id2, id1)`, and the table is physically clustered on each in turn. The same table serves the top-N and paging experiments of the partial results chapter.
+- **scale_write_0** to **scale_write_5** for the DML chapter: six copies of a 10-million-row table with five numeric columns, carrying zero to five indexes, and a `test_write_scalability` procedure that times single-row inserts, updates and deletes against each.
+- **messages** for the partial index lesson: about a million rows of which a small share (1 percent in PostgreSQL, 9 percent in the Db2 variant) are unprocessed, to compare a full index with a partial one. The Db2 version emulates the partial index with a `CASE` expression and `EXCLUDE NULL KEYS`, and shows the `+0` trick needed to make the optimizer match it.
+- **sales_iot** in Oracle: the `sales` table rebuilt as an index-organized table with a secondary index on `sale_date`, for the clustering chapter.
+- **tbl** for the 3-minute quiz: a few hundred rows with columns `date_column`, `a`, `b` and `text`, and the indexes the five quiz questions ask about.
+- Function-based index demonstrations: an index on `UPPER(last_name)` (with `varchar_pattern_ops` in PostgreSQL), and a `get_age` function that every engine refuses to index because it is not deterministic (PostgreSQL: must be `IMMUTABLE`; Db2: SQL0356N; SQLite: non-deterministic use of `strftime`).
+
+The experiments in this site's lessons reproduce these effects at playground scale. Where a lesson quotes a figure from the original, such as the hundredfold difference of the scalability chapter, it says so and names the data volume it was measured on.

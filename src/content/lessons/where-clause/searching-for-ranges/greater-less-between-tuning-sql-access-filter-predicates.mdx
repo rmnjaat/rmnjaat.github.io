@@ -1,0 +1,332 @@
+---
+title: Greater, Less and BETWEEN
+subtitle: An index range scan is cheap when the scanned range is short. With a range condition in the where clause, the column order of the index decides how short it is.
+chapter: where-clause
+order: 4.1
+kind: lesson
+minutes: 10
+summary: Where an index range scan starts and stops, why columns compared with equals belong before the column with the range condition, how to tell access predicates from filter predicates in Db2, Oracle, PostgreSQL and SQL Server plans, and why BETWEEN includes its boundaries.
+prereqs: "You should have read <a href='/sql/where-clause/the-equals-operator/concatenated-keys/'>Concatenated Keys</a> and know that a multi-column index is sorted by its first column, then its second."
+outcomes:
+  - How to find where an index scan starts and where it ends
+  - Why the equality column goes first and the range column last
+  - Why the most-selective-first rule does not help here
+  - How Db2, Oracle, PostgreSQL and SQL Server show access and filter predicates
+  - What BETWEEN means at the boundaries
+recap:
+  - The leaf node traversal is the biggest risk of an index range scan, so keep the scanned range as small as possible.
+  - An access predicate tells the scan where to start and where to stop. A filter predicate is only checked on the entries the scan reads anyway, so it does not shorten the walk.
+  - "Rule of thumb: columns with equality conditions first, the range column last."
+  - Both column orders match the same number of rows on the first column, so selectivity does not decide the order; the operators do.
+  - BETWEEN includes both boundary values, like a pair of >= and <= conditions.
+source: https://use-the-index-luke.com/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates
+---
+import { Callout, KeyIdea, Figure, EngineTabs, Check, TryIt, IndexAccess } from '@/components/mdx';
+
+The expensive part of an index range scan is not the tree. It is the walk along the leaf nodes that follows it, and the table rows that walk points to. The first rule of indexing is therefore to keep that walk short. You can check it for any query by asking two questions: where does the scan start, and where does it stop?
+
+## 1. Where the scan starts and stops
+
+Both answers are in plain sight when the statement names its bounds.
+
+```sql
+SELECT first_name, last_name, date_of_birth
+  FROM employees
+ WHERE date_of_birth >= TO_DATE(?, 'YYYY-MM-DD')
+   AND date_of_birth <= TO_DATE(?, 'YYYY-MM-DD')
+```
+
+With an index on `date_of_birth`, the traversal lands on the first entry at or after the lower date, and the leaf walk ends at the last entry at or before the upper date. Nothing outside the range is read, and nothing inside it can be skipped. The scanned range is as narrow as it can be.
+
+<IndexAccess client:visible n="2.4" leaves={4} rows={3} />
+
+## 2. A second column: which order?
+
+The answers get harder as soon as a second column joins in.
+
+```sql
+SELECT first_name, last_name, date_of_birth
+  FROM employees
+ WHERE date_of_birth >= TO_DATE(?, 'YYYY-MM-DD')
+   AND date_of_birth <= TO_DATE(?, 'YYYY-MM-DD')
+   AND subsidiary_id  = ?
+```
+
+The ideal index clearly contains both columns. The question is the order. The two figures below search for the employees of subsidiary 27 born between the first and the tenth of January 1971, once on each order.
+
+<Figure n="2.5" title="Range scan in a (date_of_birth, subsidiary_id) index">
+
+```
+branch node                leaf nodes (date_of_birth, subsidiary_id, rowid)
+----------------------     -----------------------------------------------
+27-DEC-70   19             28-DEC-70   4     ROWID
+01-JAN-71   3              01-JAN-71   3     ROWID      <- scan starts
+05-JAN-71   6              01-JAN-71   6     ROWID
+                           02-JAN-71   1     ROWID
+08-JAN-71   6              04-JAN-71   1     ROWID
+09-JAN-71   17             05-JAN-71   3     ROWID
+12-JAN-71   3              06-JAN-71   4     ROWID
+                           06-JAN-71   11    ROWID
+                           08-JAN-71   6     ROWID
+                           08-JAN-71   27    ROWID      <- the only hit
+                           09-JAN-71   10    ROWID
+                           09-JAN-71   17    ROWID      <- scan ends
+                           12-JAN-71   3     ROWID
+```
+
+<p slot="caption">The index is sorted by birth date; the subsidiary only orders entries that share a date. The scan has to cover every entry in the date range, five leaf nodes in the full index, and keeps one of them.</p>
+</Figure>
+
+In this index the entries are ordered by `date_of_birth`, and `subsidiary_id` only breaks ties between employees born on the same day. The query spans a range of dates, so during the tree traversal the subsidiary order is worthless. You can see that in the branch node: there is no entry for subsidiary 27 in it, although there is one in the leaves. Only the date condition limits the scanned range. The scan begins at the first entry in the date range and ends at the last one, and it reads every entry in between.
+
+<Figure n="2.6" title="Range scan in a (subsidiary_id, date_of_birth) index">
+
+```
+branch node                leaf nodes (subsidiary_id, date_of_birth, rowid)
+----------------------     -----------------------------------------------
+26   01-SEP-83             26   12-SEP-60    ROWID
+27   25-JUN-69             27   23-NOV-64    ROWID
+27   26-SEP-72             27   25-JUN-69    ROWID
+                           27   23-SEP-69    ROWID
+27   16-AUG-76             27   08-JAN-71    ROWID      <- start and end
+27   14-SEP-84             27   26-SEP-72    ROWID
+30   30-SEP-53             27   04-OCT-73    ROWID
+                           27   18-DEC-75    ROWID
+                           27   16-AUG-76    ROWID
+```
+
+<p slot="caption">All entries of subsidiary 27 sit together, sorted by date. The branch node already shows that the first leaf holds nothing born after June 1969 for subsidiary 27, so the traversal goes straight to the second leaf, and the scan starts and ends there.</p>
+</Figure>
+
+Reversed, the picture changes completely. The equality condition pins the first column to one value, and inside that value the entries are sorted by the second column, the date. The branch node tells the database that the first leaf has no employee of subsidiary 27 born after 25 June 1969, so it does not even visit it. The traversal leads directly to the second leaf, and because every condition in the where clause now narrows the range, the scan stops in that very same leaf.
+
+<KeyIdea title="Rule of thumb">Equality columns first, the range column last.</KeyIdea>
+
+How much the two orders differ depends on the data and the search terms. If the date condition is very selective on its own, the difference can be negligible. The wider the date range, the larger the gap becomes.
+
+## 3. Why selectivity does not decide it
+
+This example also disproves the myth that the most selective column should come first. The figures show only an excerpt, but in the full index the two conditions are equally selective: a filter on `date_of_birth` alone matches 13 rows, and a filter on `subsidiary_id` alone matches 13 rows too. Identical selectivity, and one order is still clearly better than the other. The [myth directory](/sql/myth-directory/most-selective-first/) has the longer version.
+
+<Callout kind="warning" title="Common mistake">Putting the range column first because it is "more selective". If the range is wide, the scan reads the whole range and filters the other condition entry by entry. Column order is decided by the operators in the where clause, not by the number of distinct values.</Callout>
+
+## 4. Access predicates and filter predicates in the plan
+
+Knowing the scanned range is so important that most databases show it in the execution plan, if you know what to look for. The plans below are for an index `EMP_TEST` that starts with `DATE_OF_BIRTH`, the bad order, followed by the same query on `EMP_TEST2`, which starts with `SUBSIDIARY_ID`.
+
+<EngineTabs>
+  <Fragment slot="db2">
+  Index `(date_of_birth, subsidiary_id)`:
+
+  ```
+  Explain Plan
+  ----------------------------------------------------
+  ID | Operation         |                 Rows | Cost
+   1 | RETURN            |                      |   26
+   2 |  FETCH EMPLOYEES  |     3 of 3 (100.00%) |   26
+   3 |   IXSCAN EMP_TEST | 3 of 10000 (   .03%) |    6
+
+  Predicate Information
+   3 - START ( TO_DATE(?, 'YYYY-MM-DD') <= Q1.DATE_OF_BIRTH)
+       START (Q1.SUBSIDIARY_ID = ?)
+        STOP (Q1.DATE_OF_BIRTH <= TO_DATE(?, 'YYYY-MM-DD'))
+        STOP (Q1.SUBSIDIARY_ID = ?)
+        SARG (Q1.SUBSIDIARY_ID = ?)
+  ```
+
+  Db2 labels access predicates `START` and `STOP`. A condition that also appears as `SARG` is applied as a filter during the leaf traversal; here that is `SUBSIDIARY_ID`.
+
+  Index `(subsidiary_id, date_of_birth)`:
+
+  ```
+  -----------------------------------------------------
+  ID | Operation          |                 Rows | Cost
+   1 | RETURN             |                      |   13
+   2 |  FETCH EMPLOYEES   |     3 of 3 (100.00%) |   13
+   3 |   IXSCAN EMP_TEST2 | 3 of 10000 (   .03%) |    6
+
+  Predicate Information
+   3 - START (Q1.SUBSIDIARY_ID = ?)
+       START ( TO_DATE(?, 'YYYY-MM-DD') <= Q1.DATE_OF_BIRTH)
+        STOP (Q1.SUBSIDIARY_ID = ?)
+        STOP (Q1.DATE_OF_BIRTH <= TO_DATE(?, 'YYYY-MM-DD'))
+  ```
+
+  The `SARG` line is gone: every condition is a start or stop key.
+  </Fragment>
+  <Fragment slot="oracle">
+  Index `(date_of_birth, subsidiary_id)`:
+
+  ```
+  --------------------------------------------------------------
+  |Id | Operation                    | Name      | Rows | Cost |
+  --------------------------------------------------------------
+  | 0 | SELECT STATEMENT             |           |    1 |    4 |
+  |*1 |  FILTER                      |           |      |      |
+  | 2 |   TABLE ACCESS BY INDEX ROWID| EMPLOYEES |    1 |    4 |
+  |*3 |    INDEX RANGE SCAN          | EMP_TEST  |    2 |    2 |
+  --------------------------------------------------------------
+
+  Predicate Information (identified by operation id):
+  ---------------------------------------------------
+  1 - filter(:END_DT >= :START_DT)
+  3 - access(DATE_OF_BIRTH >= :START_DT
+         AND DATE_OF_BIRTH <= :END_DT)
+      filter(SUBSIDIARY_ID  = :SUBS_ID)
+  ```
+
+  The predicate information for the `INDEX RANGE SCAN` is the decisive hint. Only the `DATE_OF_BIRTH` conditions are listed as `access`, so only they bound the scan, which tells you `DATE_OF_BIRTH` is the first column of `EMP_TEST`. `SUBSIDIARY_ID` is `filter` only. (The plan is simplified for clarity; the [Oracle plan reference](/sql/explain-plan/oracle/) explains the predicate section in full.)
+
+  Index `(subsidiary_id, date_of_birth)`:
+
+  ```
+  ---------------------------------------------------------------
+  | Id | Operation                    | Name      | Rows | Cost |
+  ---------------------------------------------------------------
+  |  0 | SELECT STATEMENT             |           |    1 |    3 |
+  |* 1 |  FILTER                      |           |      |      |
+  |  2 |   TABLE ACCESS BY INDEX ROWID| EMPLOYEES |    1 |    3 |
+  |* 3 |    INDEX RANGE SCAN          | EMP_TEST2 |    1 |    2 |
+  ---------------------------------------------------------------
+
+  Predicate Information (identified by operation id):
+  ---------------------------------------------------
+  1 - filter(:END_DT >= :START_DT)
+  3 - access(SUBSIDIARY_ID  = :SUBS_ID
+         AND DATE_OF_BIRTH >= :START_DT
+         AND DATE_OF_BIRTH <= :END_DT)
+  ```
+
+  All three conditions are access predicates now.
+  </Fragment>
+  <Fragment slot="postgresql">
+  Index `(date_of_birth, subsidiary_id)`:
+
+  ```
+                              QUERY PLAN
+  -------------------------------------------------------------------
+  Index Scan using emp_test on employees
+    (cost=0.01..8.59 rows=1 width=16)
+    Index Cond: (date_of_birth >= to_date('1971-01-01','YYYY-MM-DD'))
+            AND (date_of_birth <= to_date('1971-01-10','YYYY-MM-DD'))
+            AND (subsidiary_id = 27::numeric)
+  ```
+
+  PostgreSQL does not separate access from filter predicates in the plan. But `Index Cond` lists the conditions in the order of the index columns, and a condition on a column that comes after the range column is checked inside the index for each entry; it does not narrow the scanned range. Here the two `date_of_birth` conditions come first, so `subsidiary_id` only filters. The [PostgreSQL plan reference](/sql/explain-plan/postgresql/#access-predicates-and-filter-predicates) has the details.
+
+  Index `(subsidiary_id, date_of_birth)`:
+
+  ```
+                              QUERY PLAN
+  -------------------------------------------------------------------
+  Index Scan using emp_test2 on employees
+     (cost=0.01..8.29 rows=1 width=17)
+     Index Cond: (subsidiary_id = 27::numeric)
+             AND (date_of_birth >= to_date('1971-01-01', 'YYYY-MM-DD'))
+             AND (date_of_birth <= to_date('1971-01-10', 'YYYY-MM-DD'))
+  ```
+
+  `subsidiary_id` comes first, the range on `date_of_birth` follows, and no column is filtered after the range. Every condition is an access predicate.
+  </Fragment>
+  <Fragment slot="sql-server">
+  Index `(date_of_birth, subsidiary_id)`:
+
+  ```
+  |--Nested Loops(Inner Join)
+     |--Index Seek(OBJECT:emp_test,
+     |               SEEK:       (date_of_birth, subsidiary_id)
+     |                        >= ('1971-01-01', 27)
+     |                    AND    (date_of_birth, subsidiary_id)
+     |                        <= ('1971-01-10', 27),
+     |              WHERE:subsidiary_id=27
+     |            ORDERED FORWARD)
+     |--RID Lookup(OBJECT:employees,
+                     SEEK:Bmk1000=Bmk1000
+                   LOOKUP ORDERED FORWARD)
+  ```
+
+  SQL Server 2012 shows the seek predicates, which are the access predicates, in row-value syntax. The `WHERE:` part of the `Index Seek` is the filter predicate.
+
+  Index `(subsidiary_id, date_of_birth)`:
+
+  ```
+  |--Nested Loops(Inner Join)
+     |--Index Seek(OBJECT:emp_test2,
+     |               SEEK: subsidiary_id=27
+     |                 AND date_of_birth >= '1971-01-01'
+     |                 AND date_of_birth <= '1971-01-10'
+     |            ORDERED FORWARD)
+     |--RID Lookup(OBJECT:employees),
+                     SEEK:Bmk1000=Bmk1000
+                   LOOKUP ORDERED FORWARD)
+  ```
+
+  The `WHERE:` line has disappeared; every condition is part of the seek.
+  </Fragment>
+</EngineTabs>
+
+<Callout kind="important">
+
+An access predicate tells the traversal where to start and where to stop; together the access predicates fix the scanned index range.
+
+A filter predicate is checked only on the entries the leaf walk reads anyway. It rejects entries, but it cannot make the walk shorter.
+
+The [execution plan reference](/sql/explain-plan/) shows how to recognise access predicates in MySQL, SQL Server and PostgreSQL.
+
+</Callout>
+
+## 5. BETWEEN
+
+The `BETWEEN` operator states both bounds in one condition.
+
+```sql
+DATE_OF_BIRTH BETWEEN '01-JAN-71'
+                  AND '10-JAN-71'
+```
+
+It always includes the boundary values, exactly as a pair of `>=` and `<=` conditions does.
+
+```sql
+    DATE_OF_BIRTH >= '01-JAN-71'
+AND DATE_OF_BIRTH <= '10-JAN-71'
+```
+
+To the index the two spellings are the same: one start condition and one stop condition.
+
+## 6. Try it
+
+The playground has an index on `(date_of_birth, subsidiary_id)`, the wrong order for this query. SQLite lists only the conditions it uses as scan boundaries, so `subsidiary_id` does not appear in the plan at all even though the column is in the index. That absence is the filter predicate.
+
+<TryIt id="2.4.1" tasks={[
+  { text: 'Run the query as given. The plan should show only <code>date_of_birth</code> bounds: <code>(date_of_birth&gt;? AND date_of_birth&lt;?)</code>.', sql: 'subsidiary_id\\s*=\\s*20', plan: 'emp_dob_sub \\(date_of_birth>\\? AND date_of_birth<\\?\\)' },
+  { text: 'Create a second index <code>emp_sub_dob</code> on <code>(subsidiary_id, date_of_birth)</code>.', sql: 'create\\s+index\\s+emp_sub_dob' },
+  { text: 'Run the query again. Now all three conditions bound the scan: <code>(subsidiary_id=? AND date_of_birth&gt;? AND date_of_birth&lt;?)</code>.', sql: 'subsidiary_id\\s*=\\s*20', plan: 'subsidiary_id=\\? AND date_of_birth>\\? AND date_of_birth<\\?' },
+]} setup={`CREATE INDEX emp_dob_sub ON employees (date_of_birth, subsidiary_id); ANALYZE;`} sql={`SELECT first_name, last_name, date_of_birth
+  FROM employees
+ WHERE date_of_birth >= '1971-01-01'
+   AND date_of_birth <= '1971-12-31'
+   AND subsidiary_id  = 20;`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 1</summary><div class="d">Thirty employees were born in 1971; fifteen of them are in subsidiary 20. With the date column first, the scan reads all thirty entries and discards half.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX emp&#95;sub&#95;dob ON employees (subsidiary&#95;id, date&#95;of&#95;birth);
+SELECT first&#95;name, last&#95;name, date&#95;of&#95;birth
+  FROM employees
+ WHERE date&#95;of&#95;birth &gt;= '1971-01-01'
+   AND date&#95;of&#95;birth &lt;= '1971-12-31'
+   AND subsidiary&#95;id  = 20;
+-- plan: SEARCH employees USING INDEX emp&#95;sub&#95;dob
+--       (subsidiary&#95;id=? AND date&#95;of&#95;birth&gt;? AND date&#95;of&#95;birth&lt;?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="A report runs WHERE employee_id = ? AND sale_date BETWEEN ? AND ? on the sales table. Which index serves it best?"
+  options={[
+    '(sale_date, employee_id), because dates are more selective',
+    '(employee_id, sale_date), because the equality column goes first',
+    'Either order; both columns are in the index',
+  ]}
+  answer={1}
+  explain="With employee_id first, all sales of that employee sit together, sorted by date, and both conditions are access predicates. With sale_date first, the scan covers every sale in the date range and the employee condition is only a filter. The operators decide the order, not the selectivity."
+/>

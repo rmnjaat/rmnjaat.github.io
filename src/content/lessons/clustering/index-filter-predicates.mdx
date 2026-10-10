@@ -1,0 +1,244 @@
+---
+title: Index Filter Predicates Used Intentionally
+subtitle: A filter predicate in the index is usually a warning sign. Sometimes it is the whole point, because the index is a narrow, sorted copy of the table that is cheap to filter, and the table access it saves is where the time goes.
+chapter: clustering
+order: 1
+kind: lesson
+minutes: 10
+summary: "The second power of indexing, clustering, shown through an index filter predicate used on purpose: extending an existing index with a column that a leading-wildcard LIKE cannot search, so that most candidate rows are rejected before the table is read. Covers the clustering factor, row sequencing, and when not to do it."
+prereqs: "You should know the difference between access and filter predicates (<a href='/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates/'>Greater, less and between</a>) and why a leading wildcard cannot use the tree (<a href='/sql/where-clause/searching-for-ranges/like-performance-tuning/'>LIKE</a>)."
+outcomes:
+  - What a data cluster is and why the sorted leaf nodes of an index make it the simplest clustering tool
+  - Why the table access, not the index scan, dominates the cost of a typical lookup, and how the clustering factor measures it
+  - How adding a column that cannot be an access predicate still cuts the number of table reads
+  - Why to extend an existing index rather than create a new one, and why column order still comes first
+recap:
+  - Clustering means storing data that is read together close together. The row is the smallest cluster; an index clusters rows with similar values because its leaves are sorted. That is the second power of indexing.
+  - Table access is the expensive part of an index lookup, because the matching rows are scattered over the table's blocks. The index clustering factor measures how scattered.
+  - Adding a column to the index so that a condition is checked on the index entry removes the table access for every row the condition rejects. The plan shows the same operations; the row count on the table access drops.
+  - Extend an existing index, put the access column first, and only add filter columns that reject many rows. Every column makes the index bigger and slower to maintain.
+source: https://use-the-index-luke.com/sql/clustering/index-filter-predicates
+---
+import { Callout, KeyIdea, Check, TryIt, IndexAccess, EngineTabs } from '@/components/mdx';
+
+The word cluster means different things. A star cluster is a group of stars; a computer cluster is a group of machines that work together, for performance or for failover. In a database conversation "let's use a cluster" could mean either of those or something else entirely: a **data cluster**, which is data that is read together stored together, so that reading it takes fewer I/O operations. This unit is about data clusters, and about the fact that an index is the simplest tool for building one.
+
+## 1. Clusters, from the row up
+
+The smallest cluster in a SQL database is the row. All columns of a row sit in the same block whenever they fit; only oversized rows, for example with LOB columns, spill over. Column stores turn that around and keep each column together instead, which suits data warehouses that read many rows but few columns.
+
+An index clusters too. Its leaf nodes hold the indexed values in sorted order, so rows with similar values end up next to each other in the index even when they are far apart in the table. [Unit 1](/sql/anatomy/) called the B-tree traversal the first power of indexing. This ability to group related data is the **second power of indexing**, and the three lessons of this unit show how to use it.
+
+## 2. Where the time goes
+
+[Unit 2](/sql/where-clause/) drew a line between access predicates, which decide where an index scan starts and stops, and filter predicates, which are checked on every entry inside that range without narrowing it. A filter predicate in the index usually means the column order of a concatenated index is wrong. This lesson is about the case where it is exactly what you want: not to make the range scan faster, but to keep the rows a query needs together.
+
+Conditions that cannot be access predicates are the candidates. A `LIKE` with a leading wildcard is the classic one:
+
+```sql
+SELECT first_name, last_name, subsidiary_id, phone_number
+  FROM employees
+ WHERE subsidiary_id = ?
+   AND UPPER(last_name) LIKE '%INA%'
+```
+
+The pattern cannot use the tree, so an index on `last_name`, or on `UPPER(last_name)`, would not narrow the scanned range at all. The condition on `subsidiary_id`, on the other hand, is a fine access predicate, and it needs no new index: since [Unit 2](/sql/where-clause/the-equals-operator/concatenated-keys/) swapped the primary key to `(subsidiary_id, employee_id)`, `subsidiary_id` already leads the primary key index.
+
+<EngineTabs>
+  <Fragment slot="oracle">
+  ```
+  ---------------------------------------------------------------
+  |Id | Operation                   | Name        | Rows | Cost |
+  ---------------------------------------------------------------
+  | 0 | SELECT STATEMENT            |             |   17 |  230 |
+  |*1 |  TABLE ACCESS BY INDEX ROWID| EMPLOYEES   |   17 |  230 |
+  |*2 |   INDEX RANGE SCAN          | EMPLOYEES_PK|  333 |    2 |
+  ---------------------------------------------------------------
+
+  Predicate Information (identified by operation id):
+  ---------------------------------------------------
+     1 - filter(UPPER("LAST_NAME") LIKE '%INA%')
+     2 - access("SUBSIDIARY_ID"=TO_NUMBER(:A))
+  ```
+  The index range scan costs 2 and delivers 333 rows. The table access that follows costs 230, a hundred times more, and only then is the `LIKE` applied, which keeps 17.
+  </Fragment>
+  <Fragment slot="db2">
+  ```
+  Explain Plan
+  ------------------------------------------------------------
+  ID | Operation               |                   Rows | Cost
+   1 | RETURN                  |                        |   40
+   2 |  FETCH EMPLOYEES        |    33 of 333 (  9.91%) |   40
+   3 |   RIDSCN                |   333 of 333 (100.00%) |   12
+   4 |    SORT (UNIQUE)        |   333 of 333 (100.00%) |   12
+   5 |     IXSCAN EMPLOYEES_PK | 333 of 10000 (  3.33%) |   12
+
+  Predicate Information
+   2 - SARG (Q1.SUBSIDIARY_ID = ?)
+       SARG ( UPPER(Q1.LAST_NAME) LIKE '%INA%')
+   5 - START (Q1.SUBSIDIARY_ID = ?)
+        STOP (Q1.SUBSIDIARY_ID = ?)
+  ```
+  `IXSCAN` delivers 333 row ids; `FETCH` reads all 333 rows and applies the `LIKE` as a `SARG` on the table, keeping 33.
+  </Fragment>
+  <Fragment slot="postgresql">
+  ```
+  Index Scan using employees_pk on employees  (cost=0.29..230.40 rows=17 width=40)
+    Index Cond: (subsidiary_id = $1)
+    Filter: (upper(last_name) ~~ '%INA%'::text)
+    Rows Removed by Filter: 316
+  ```
+  `Filter` under an `Index Scan` is applied to the fetched table row. `Rows Removed by Filter` (from `EXPLAIN ANALYZE`) counts the table reads that were wasted.
+  </Fragment>
+  <Fragment slot="sql-server">
+  ```
+  |--Nested Loops(Inner Join, OUTER REFERENCES:([Bmk1000]))
+       |--Index Seek(OBJECT:([employees].[employees_pk]), SEEK:([subsidiary_id]=@1) ORDERED FORWARD)
+       |--Key Lookup(OBJECT:([employees].[employees_pk]), SEEK:([Bmk1000]=[Bmk1000]),
+                WHERE:(upper([last_name]) like '%INA%') LOOKUP ORDERED FORWARD)
+  ```
+  The `WHERE` sits on the `Key Lookup`, so it runs after each of the 333 rows has been fetched.
+  </Fragment>
+</EngineTabs>
+
+The cost jumps a hundredfold from the index scan to the table access. That is a common and perfectly normal pattern, but it also says where the time goes: the table access is the biggest contributor to this query's response time.
+
+Whether it is a problem depends on where the rows are. If all 333 rows sat in one table block, one read would fetch them all. If they are spread over 333 blocks, the database reads 333 blocks. What the table access costs is set by where the rows physically are, which is to say by how tightly they are clustered.
+
+<Callout kind="note" title="The index clustering factor">How closely the table order follows the index order is measured by the **index clustering factor**: a number that roughly says how likely it is that the next index entry points into the same table block as the current one. The optimizer uses it to cost the table access by rowid.</Callout>
+
+One could reorder the table so that it follows the index, and some databases offer a tool for that. It is rarely practical: a table can only be stored in one order, so it can match one index only, and the tools are rudimentary. This kind of **row sequencing** is not a general solution.
+
+## 3. Move the filter into the index
+
+The practical solution is the second power of indexing. An index can carry as many columns as you like, and it keeps them in a well-defined order. So extend the index until it holds every column of the where clause, including the one that cannot narrow the range:
+
+```sql
+CREATE INDEX empsubupnam ON employees
+       (subsidiary_id, UPPER(last_name))
+```
+
+`subsidiary_id` comes first, so it still serves as the access predicate. `UPPER(last_name)` serves the `LIKE` as an index filter predicate. Indexing the uppercase form saves a few CPU cycles per comparison; an index on the plain `last_name` would do the same job, and the next lesson gives a reason to prefer it.
+
+<IndexAccess client:visible n="5.1" leaves={2} rows={2} />
+
+Step through the figure. The access predicate confines the scan to a couple of leaf nodes. Most entries inside them fail the filter and cost nothing beyond the comparison. Only the entries that pass trigger the arrow to the table, and that arrow is where the time went.
+
+<EngineTabs>
+  <Fragment slot="oracle">
+  ```
+  --------------------------------------------------------------
+  |Id | Operation                   | Name       | Rows | Cost |
+  --------------------------------------------------------------
+  | 0 | SELECT STATEMENT            |            |   17 |   20 |
+  | 1 |  TABLE ACCESS BY INDEX ROWID| EMPLOYEES  |   17 |   20 |
+  |*2 |   INDEX RANGE SCAN          | EMPSUBUPNAM|   17 |    3 |
+  --------------------------------------------------------------
+
+  Predicate Information (identified by operation id):
+  ---------------------------------------------------
+     2 - access("SUBSIDIARY_ID"=TO_NUMBER(:A))
+         filter(UPPER("LAST_NAME") LIKE '%INA%')
+  ```
+  Same two operations, but the `filter` moved onto the `INDEX RANGE SCAN`, which now delivers 17 rows instead of 333, and the table access has no predicate left. Its cost fell from 230 to 20. The index scan went from 2 to 3 because the index is wider; a fair trade.
+  </Fragment>
+  <Fragment slot="db2">
+  ```
+  Explain Plan
+  --------------------------------------------------------
+  ID | Operation             |                 Rows | Cost
+   1 | RETURN                |                      |   15
+   2 |  FETCH EMPLOYEES      |               0 of 0 |   15
+   3 |   IXSCAN EMPSUBUPNAM2 | 0 of 10000 (   .00%) |   15
+
+  Predicate Information
+   3 - START (Q1.SUBSIDIARY_ID = ?)
+        STOP (Q1.SUBSIDIARY_ID = ?)
+        SARG (Q1.LAST_NAME LIKE '%INA%')
+  ```
+  The `SARG` now sits on the `IXSCAN`. To get this plan on Db2 (LUW) 10.5 the `UPPER` had to go from both the index and the where clause: function-based indexes were new in that release and the optimizer did not use them well. In Db2 a case-insensitive collation is the better tool for this anyway.
+  </Fragment>
+  <Fragment slot="postgresql">
+  ```
+  Index Scan using empsubupnam on employees  (cost=0.29..24.10 rows=17 width=40)
+    Index Cond: (subsidiary_id = $1)
+    Filter: (upper(last_name) ~~ '%INA%'::text)
+    Rows Removed by Filter: 316
+  ```
+  PostgreSQL applies `Filter` after fetching the row, even when the column is in the index, so this plan still reads 333 rows. The filter runs on index entries only in an `Index Only Scan`, which needs the select list covered as well; the next lesson shows how. The [PostgreSQL plan page](/sql/explain-plan/postgresql/) explains how to tell the two apart.
+  </Fragment>
+  <Fragment slot="sql-server">
+  ```
+  |--Nested Loops(Inner Join, OUTER REFERENCES:([Bmk1000]))
+       |--Index Seek(OBJECT:([employees].[empsubupnam]),
+       |        SEEK:([subsidiary_id]=@1),
+       |        WHERE:([up_name] like '%INA%') ORDERED FORWARD)
+       |--Key Lookup(OBJECT:([employees].[employees_pk]), SEEK:([Bmk1000]=[Bmk1000]) LOOKUP ORDERED FORWARD)
+  ```
+  The `WHERE` moved onto the `Index Seek` (shown as `Predicate` next to `Seek Predicates` in the graphical plan), so the `Key Lookup` runs 17 times instead of 333. The [SQL Server plan page](/sql/explain-plan/sql-server/) has more.
+  </Fragment>
+  <Fragment slot="mysql">
+  ```
+             id: 1
+    select_type: SIMPLE
+          table: employees
+           type: ref
+  possible_keys: empsubupnam
+            key: empsubupnam
+            ref: const
+           rows: 333
+          Extra: Using index condition
+  ```
+  `Using index condition` is index condition pushdown: the `LIKE` is checked on the index entry before the row is read. Without it `Extra` says `Using where`, meaning the filter ran on the fetched rows.
+  </Fragment>
+</EngineTabs>
+
+Read the `Rows` column of the two Oracle plans. Both end at 17. In the first plan the index scan delivered 333 entries and the table was read 333 times to apply the `LIKE`. In the second, the index scan rejects the non-matching entries itself, so the table is read 17 times. The operations are identical; the number of times the expensive one runs is what changed.
+
+<KeyIdea>An index filter predicate does not make the index scan faster. It makes the table access run fewer times, and the table access is where the time goes.</KeyIdea>
+
+<Callout kind="warning" title="Do not add a new index for this">Never create an index just to hold a filter predicate. Extend an existing one instead, so that the maintenance cost on every write ([Unit 8](/sql/dml/)) stays low. A few engines go as far as letting you append non-key columns to the primary key index itself.</Callout>
+
+## 4. When it is worth it
+
+The example looks like a confirmation of the folk rule "index every column in the where clause". It is not. The rule ignores column order, and column order decides which conditions become access predicates, which has a far bigger effect on performance. The equality column goes first so that the scanned range is as small as possible; the filter column goes after it. Put `last_name` first and subsidiary 30 is scattered over the whole index.
+
+An index also grows with every column, text columns in particular. A bigger index is never faster by itself, even if logarithmic scalability keeps the damage small. So do not put all where-clause columns into the index on principle. Add a filter column intentionally, when the access predicate already narrows the scan to a few leaves, the filter rejects most of the entries in them, and the query runs often enough to pay for the wider index.
+
+<Callout kind="tip" title="Related pages">The [glossary entry](/sql/glossary/) for index filter predicates; [access and filter predicates by example](/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates/); [what an accidental filter predicate costs at volume](/sql/testing-scalability/data-volume/); [why anywhere-LIKE cannot be an access predicate](/sql/where-clause/searching-for-ranges/like-performance-tuning/); and how to spot filter predicates in [Oracle](/sql/explain-plan/oracle/), [PostgreSQL](/sql/explain-plan/postgresql/) and [SQL Server](/sql/explain-plan/sql-server/) plans.</Callout>
+
+## 5. See the filter run in the index
+
+The playground creates `employees_sub_name` on `(subsidiary_id, last_name)`; the playground's primary key still has `employee_id` first, so the index supplies the leading `subsidiary_id`. SQLite does not print filter predicates in its plan, so use the select list to prove where the filter runs. With only `last_name` selected, the plan says `COVERING INDEX`: the `LIKE` is checked on the index entries and the table is never touched. Of the 200 employees in subsidiary 30, 33 match.
+
+<TryIt id="5.1" setup={`CREATE INDEX employees_sub_name ON employees (subsidiary_id, last_name);`} tasks={[
+  { text: 'Run the query. The plan says <code>SEARCH employees USING COVERING INDEX employees_sub_name (subsidiary_id=?)</code>. The parentheses hold the access predicate only; the <code>LIKE</code> is applied to the entries.', sql: "like\\s*'%an%'", plan: 'COVERING INDEX employees_sub_name' },
+  { text: 'Add <code>first_name</code> and <code>phone_number</code> to the select list. The plan drops to <code>USING INDEX</code>: the table is now visited, but only for the 33 entries that pass the filter.', sql: 'phone_number[\\s\\S]*like', plan: 'USING INDEX employees_sub_name' },
+  { text: 'Remove the <code>subsidiary_id = 30</code> condition. Without an access predicate there is nothing to search for; the plan becomes a full <code>SCAN</code> (of the narrower index, since only <code>last_name</code> is selected) and every one of the 1,000 entries is tested.', sql: "^(?![\\s\\S]*subsidiary_id\\s*=)[\\s\\S]*like\\s*'%an%'", plan: '^SCAN employees' },
+]} sql={`SELECT last_name
+  FROM employees
+ WHERE subsidiary_id = 30
+   AND last_name LIKE '%an%';`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 2</summary><div class="d">Keep the where clause as it is; only the select list changes. <code>USING INDEX</code> without <code>COVERING</code> means the index found the entries and the table supplied the other columns.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT first&#95;name, last&#95;name, phone&#95;number
+  FROM employees
+ WHERE subsidiary&#95;id = 30
+   AND last&#95;name LIKE '%an%';
+-- plan: SEARCH employees USING INDEX employees&#95;sub&#95;name (subsidiary&#95;id=?)
+SELECT last&#95;name FROM employees WHERE last&#95;name LIKE '%an%';
+-- plan: SCAN employees USING COVERING INDEX employees&#95;sub&#95;name</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="The index on employees changes from (subsidiary_id) to (subsidiary_id, last_name). For WHERE subsidiary_id = 30 AND last_name LIKE '%an%', what gets cheaper?"
+  options={[
+    'The tree traversal, because the index is more selective.',
+    'The leaf scan, because fewer index entries are read.',
+    'The table access, because rows that fail the LIKE are rejected before they are fetched.',
+  ]}
+  answer={2}
+  explain="The traversal has the same depth, and the scan still covers every entry for subsidiary 30 because a leading wildcard cannot narrow the range. What disappears is the table access for the five out of six entries the filter rejects, and the table access was the expensive part."
+/>

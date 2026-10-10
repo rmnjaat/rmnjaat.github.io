@@ -1,0 +1,225 @@
+---
+title: Indexing LIKE Filters
+subtitle: LIKE uses the index only for the characters before the first wildcard. Put the wildcard at the front and the pattern cannot narrow the scan at all.
+chapter: where-clause
+order: 4.2
+kind: lesson
+minutes: 10
+summary: Why the position of the wildcard decides whether a LIKE condition can use an index, how one LIKE expression splits into an access predicate and a filter predicate, what goes wrong with bind parameters, and which full-text features to use instead of a leading wildcard.
+prereqs: "You should have read <a href='/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates/'>Greater, Less and BETWEEN</a> and know the difference between an access predicate and a filter predicate."
+outcomes:
+  - Why some LIKE search terms index well and others cannot
+  - How one LIKE expression becomes an access predicate and a filter predicate
+  - How the length of the prefix changes the scanned index range
+  - What happens when the search term is a bind parameter
+  - Which full-text search features replace a leading wildcard
+recap:
+  - Only the characters before the first wildcard are an access predicate. The rest of the pattern is a filter predicate that does not narrow the scanned range.
+  - The more selective the prefix, the smaller the scanned range and the faster the lookup.
+  - A pattern that starts with a wildcard cannot be an access predicate; without another access predicate the whole table is scanned.
+  - With a bind parameter the optimizer has to guess whether there is a leading wildcard. Most databases assume there is not. PostgreSQL plans the first five executions with the real value and only then considers a generic plan.
+  - For full-text search use CONTAINS, MATCH AGAINST or the @@ operator, not LIKE.
+source: https://use-the-index-luke.com/sql/where-clause/searching-for-ranges/like-performance-tuning
+---
+import { Callout, KeyIdea, Figure, EngineTabs, Check, TryIt } from '@/components/mdx';
+
+`LIKE` is a frequent source of surprises. The same statement is fast for one search term and slow for the next, because some terms can use an index and others cannot. What makes the difference is where the wildcard characters sit.
+
+## 1. A wildcard in the middle
+
+Start with a pattern that has the `%` wildcard in the middle of the term, against a function-based index on `UPPER(last_name)`.
+
+```sql
+SELECT first_name, last_name, date_of_birth
+  FROM employees
+ WHERE UPPER(last_name) LIKE 'WIN%D'
+```
+
+<EngineTabs>
+  <Fragment slot="db2">
+  ```
+  Explain Plan
+  ----------------------------------------------------
+  ID | Operation         |                 Rows | Cost
+   1 | RETURN            |                      |   13
+   2 |  FETCH EMPLOYEES  |     1 of 1 (100.00%) |   13
+   3 |   IXSCAN EMP_NAME | 1 of 10000 (   .01%) |    6
+
+  Predicate Information
+   3 - START ('WIN....................................
+        STOP (Q1.LAST_NAME <= 'WIN....................
+        SARG (Q1.LAST_NAME LIKE 'WIN%D')
+  ```
+
+  This plan was taken with `WHERE last_name LIKE 'WIN%D'`, without `UPPER`: Db2 (LUW) 10.5 does not seem able to derive access predicates from a `LIKE` on a function-based index and does a full index scan at best. Apart from that Db2 is the clearest of all: the `START` and `STOP` keys are built from the part before the first wildcard, and the `SARG` line shows the full pattern applied as a filter.
+  </Fragment>
+  <Fragment slot="mysql">
+  ```
+  +----+-----------+-------+----------+---------+------+-------------+
+  | id | table     | type  | key      | key_len | rows | Extra       |
+  +----+-----------+-------+----------+---------+------+-------------+
+  |  1 | employees | range | emp_name | 767     |    2 | Using where |
+  +----+-----------+-------+----------+---------+------+-------------+
+  ```
+
+  The access type `range` says the prefix was turned into a range scan; `Using where` is the filter on the rest of the pattern. MySQL has function-based indexes only since 8.0.13, so this plan was taken without `UPPER` and uses a plain index on `last_name`.
+  </Fragment>
+  <Fragment slot="oracle">
+  ```
+  ---------------------------------------------------------------
+  |Id | Operation                   | Name        | Rows | Cost |
+  ---------------------------------------------------------------
+  | 0 | SELECT STATEMENT            |             |    1 |    4 |
+  | 1 |  TABLE ACCESS BY INDEX ROWID| EMPLOYEES   |    1 |    4 |
+  |*2 |   INDEX RANGE SCAN          | EMP_UP_NAME |    1 |    2 |
+  ---------------------------------------------------------------
+
+  Predicate Information (identified by operation id):
+  ---------------------------------------------------
+     2 - access(UPPER("LAST_NAME") LIKE 'WIN%D')
+         filter(UPPER("LAST_NAME") LIKE 'WIN%D')
+  ```
+
+  The same expression appears as `access` and as `filter`: the prefix bounds the range scan, the full pattern is re-checked on each entry.
+  </Fragment>
+  <Fragment slot="postgresql">
+  ```
+                         QUERY PLAN
+  ----------------------------------------------------------
+  Index Scan using emp_up_name on employees
+     (cost=0.01..8.29 rows=1 width=17)
+     Index Cond: (upper((last_name)::text) ~>=~ 'WIN'::text)
+             AND (upper((last_name)::text) ~<~  'WIO'::text)
+         Filter: (upper((last_name)::text) ~~ 'WIN%D'::text)
+  ```
+
+  PostgreSQL spells out the rewrite: the prefix becomes a range from `WIN` up to but not including `WIO`, and the complete pattern is a `Filter`.
+  </Fragment>
+</EngineTabs>
+
+## 2. Two predicates in one expression
+
+Only the characters before the first wildcard can steer the tree traversal. Whatever follows the wildcard cannot narrow the scanned index range; it can only reject entries as the leaf traversal passes them. A single `LIKE` expression therefore contains two kinds of predicate at once: the part before the first wildcard is an access predicate, and the remaining characters are a filter predicate.
+
+<Callout kind="warning" title="Collations">`LIKE` compares character by character, while some collations treat several characters as one sorting unit. Such collations can prevent `LIKE` from using an index at all. Laurenz Albe's article "Indexing LIKE in PostgreSQL and Oracle" covers the details.</Callout>
+
+The more selective the prefix, the smaller the scanned range, and the faster the lookup. The figure shows three patterns that all find the same single row with very different amounts of work.
+
+<Figure n="2.7" title="Three LIKE searches for the same row">
+
+```
+index on UPPER(last_name)      LIKE 'WI%ND'   LIKE 'WIN%D'   LIKE 'WINA%'
+--------------------------     ------------   ------------   ------------
+WIAW                           scanned
+WIBLQQNPUA                     scanned
+WIBYHSNZ                       scanned
+WIFMDWUQMB                     scanned
+WIGLZX                         scanned
+WIH                            scanned
+WIHTFVZNLC                     scanned
+WIJYAXPP                       scanned
+WINAND                         scanned, hit   scanned, hit   scanned, hit
+WINBKYDSKW                     scanned        scanned
+WIPOJ                          scanned
+WISRGPKX                       scanned
+WITJIVQJ                       scanned
+WIW                            scanned
+WIWGPJMQGG                     scanned
+WIWKHLBJ                       scanned
+WIYETHN                        scanned
+WIYJ                           scanned
+```
+
+<p slot="caption">Eighteen entries start with WI, two start with WIN, one starts with WINA. Each pattern scans exactly the entries that match its prefix and filters the rest of the pattern on them.</p>
+</Figure>
+
+The first pattern has a two-character prefix, which limits the scan to 18 entries. Only one of them matches the whole pattern; the other 17 are read and thrown away. The second pattern's longer prefix narrows the scan to two entries, so only one is wasted. The third pattern has no filter predicate at all: the prefix alone selects exactly the matching entry.
+
+<KeyIdea>The index can only use the characters in front of the first wildcard to bound the scan. Everything after it is checked entry by entry and does not shrink the range.</KeyIdea>
+
+## 3. Leading wildcards
+
+The opposite extreme is a pattern that begins with a wildcard. There is no prefix, so there is nothing to traverse to and the expression cannot be an access predicate. If no other condition in the where clause provides one, the database has to scan the whole table.
+
+<Callout kind="tip">A pattern that starts with a wildcard, such as `'%TERM'`, cannot be an access predicate. Keep the wildcard out of the first position wherever you can.</Callout>
+
+One special case has a way out. When the wildcard sits only at the front, `'%TERM'`, the pattern is a prefix search on the string read backwards. A function-based index on `REVERSE(column)` together with the condition `REVERSE(column) LIKE 'MRET%'` gives the index a prefix again. A pattern with wildcards at both ends leaves nothing to reverse.
+
+## 4. Bind parameters and the generic plan
+
+In theory the wildcard position decides index usage. In practice the search term usually arrives as a bind parameter, and the optimizer builds one generic plan without seeing it. It then has to guess whether most executions will have a leading wildcard or not.
+
+Most databases assume there is no leading wildcard when they optimize a `LIKE` with a bind parameter. That assumption is wrong when the `LIKE` is really a full-text search, and there is no direct way to mark a condition as such. Separating the wildcards from the term looks like it should work, but it does not:
+
+```sql
+WHERE text_column LIKE '%' || ? || '%'
+```
+
+Writing the term into the statement as a literal is the obvious alternative, but it raises the optimization overhead and opens the door to SQL injection. A secure and portable answer is to obfuscate the condition on purpose so that the index is not considered. [Combining Columns](/sql/where-clause/obfuscation/concatenation/) shows how.
+
+PostgreSQL once took the opposite view, assumed a leading wildcard for a parameterized `LIKE` and left the index alone, and older advice still says so. Since release 9.2 the server plans the first five executions of a prepared statement with the actual parameter values, so `LIKE $1` with `'WIN%'` gets the range scan. Only then does it consider a generic plan, which cannot assume a prefix, and it adopts that plan only if it is estimated to be no more expensive than the custom ones. Since release 12, `plan_cache_mode = force_custom_plan` keeps the value-specific plans for a statement where that matters.
+
+Even a plan that is correctly built for a leading wildcard can be too slow. Then another part of the where clause has to provide the access path; [Index Filter Predicates Used Intentionally](/sql/clustering/index-filter-predicates/) looks at that. If there is no other access path, the database's full-text features are the way out.
+
+## 5. Full-text search instead of LIKE
+
+<EngineTabs>
+  <Fragment slot="db2">
+  Db2 Text Search adds a `CONTAINS` predicate that reads a text index instead of scanning the column: `WHERE CONTAINS(description, 'index') = 1`. The Db2 documentation describes it with the other search functions of Db2 Text Search.
+  </Fragment>
+  <Fragment slot="mysql">
+  MySQL has a `FULLTEXT` index type, queried with `MATCH ... AGAINST`: `WHERE MATCH(description) AGAINST('index')`. InnoDB tables can carry such an index since 5.6; before that it was a MyISAM-only feature.
+  </Fragment>
+  <Fragment slot="oracle">
+  Oracle Text provides the `CONTAINS` operator over a `CONTEXT` index: `WHERE CONTAINS(description, 'index') > 0`. The Oracle Text Application Developer's Guide covers the index types and the query syntax.
+  </Fragment>
+  <Fragment slot="postgresql">
+  PostgreSQL's full-text search matches a `tsvector` against a `tsquery` with the `@@` operator, backed by a GIN index: `WHERE to_tsvector('english', description) @@ to_tsquery('index')`.
+
+  If what you really need is `LIKE '%term%'` on short strings, the `pg_trgm` extension is the simpler answer. It indexes three-character fragments, and a GIN or GiST trigram index serves `LIKE` and `ILIKE` with wildcards anywhere in the pattern:
+
+  ```sql
+  CREATE EXTENSION pg_trgm;
+  CREATE INDEX emp_name_trgm ON employees USING gin (last_name gin_trgm_ops);
+  ```
+  </Fragment>
+  <Fragment slot="sql-server">
+  SQL Server's full-text search uses `CONTAINS`, or `FREETEXT` for a looser match, on a full-text index: `WHERE CONTAINS(description, 'index')`. The Full-Text Search chapter of the SQL Server documentation has the setup.
+  </Fragment>
+  <Fragment slot="sqlite">
+  The FTS5 extension provides a virtual table that answers `MATCH` queries: `SELECT * FROM docs WHERE docs MATCH 'index'`. For the prefix case note that SQLite's `LIKE` ignores case for ASCII letters, so the planner does not turn it into a range scan on a case-sensitive index. Use `GLOB`, an explicit range, or `PRAGMA case_sensitive_like = 1`, after which `LIKE 'Win%'` becomes a range scan on the plain index.
+  </Fragment>
+</EngineTabs>
+
+## 6. Try it
+
+The playground has an index on `last_name`. Because SQLite's `LIKE` is case-insensitive, the query uses `GLOB`, whose `*` plays the role of `%`. The prefix becomes a range in the plan.
+
+<TryIt id="2.4.2" tasks={[
+  { text: 'Run the query. The plan turns the prefix into a range: <code>(last_name&gt;? AND last_name&lt;?)</code>.', sql: "glob\\s+'Win\\*", plan: 'last_name>\\? AND last_name<\\?' },
+  { text: 'Replace the pattern with <code>\'*nand\'</code>, a leading wildcard. The plan should fall back to <code>SCAN employees</code>.', sql: "glob\\s+'\\*nand'", plan: '^SCAN employees' },
+  { text: 'Write the prefix search as an explicit range, <code>last_name &gt;= \'Win\' AND last_name &lt; \'Wio\'</code>, and compare the plan with task 1.', sql: "last_name\\s*>=\\s*'Win'", plan: 'last_name>\\? AND last_name<\\?' },
+]} setup={`CREATE INDEX emp_name ON employees (last_name); ANALYZE;`} sql={`SELECT first_name, last_name
+  FROM employees
+ WHERE last_name GLOB 'Win*d';`}>
+  <Fragment slot="hints">
+    <details class="hint"><summary>Hint for task 2</summary><div class="d">With nothing before the wildcard there is no entry to traverse to, and the only remaining option is to read every row.</div></details>
+    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT first&#95;name, last&#95;name FROM employees WHERE last&#95;name GLOB '&#42;nand';
+-- plan: SCAN employees
+SELECT first&#95;name, last&#95;name FROM employees
+ WHERE last&#95;name &gt;= 'Win' AND last&#95;name &lt; 'Wio';
+-- plan: SEARCH employees USING INDEX emp&#95;name (last&#95;name&gt;? AND last&#95;name&lt;?)</pre></div></details>
+  </Fragment>
+</TryIt>
+
+<Check
+  client:visible
+  question="How can you index a LIKE search whose only wildcard is at the beginning, such as '%TERM'?"
+  options={[
+    'Create a normal B-tree index on the column; the optimizer reverses the pattern on its own.',
+    'Index the reversed string with a function-based index and search for the reversed term with a trailing wildcard.',
+    'It is impossible; only a full-text index can help.',
+  ]}
+  answer={1}
+  explain="A pattern that ends with a fixed suffix is a prefix search on the reversed string. A function-based index on REVERSE(column) with a query on REVERSE(column) LIKE 'MRET%' gives the index a prefix to work with. A pattern with wildcards at both ends is a different matter and needs full-text search."
+/>
