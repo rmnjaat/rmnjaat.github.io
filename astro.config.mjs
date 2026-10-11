@@ -7,7 +7,7 @@ import { satteri } from '@astrojs/markdown-satteri';
 import { wrapTables } from './src/lib/hast-wrap-tables.mjs';
 
 export default defineConfig({
-  site: 'https://ramanjangu1.github.io',
+  site: 'https://rmnjaat.github.io',
   integrations: [mdx(), react(), sitemap(), pagefind()],
   compressHTML: true,
   prefetch: { defaultStrategy: 'hover' },

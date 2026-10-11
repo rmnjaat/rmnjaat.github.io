@@ -2,7 +2,7 @@
 
 A plain information site about SQL indexing for developers. It follows the structure of Markus Winand's book *SQL Performance Explained* (free online as [use-the-index-luke.com](https://use-the-index-luke.com)) chapter by chapter and page by page, rewritten in its own words with step-by-step figures and a per-engine execution plan appendix.
 
-Live: https://ramanjangu1.github.io/
+Live: https://rmnjaat.github.io/
 
 ## Stack
 
