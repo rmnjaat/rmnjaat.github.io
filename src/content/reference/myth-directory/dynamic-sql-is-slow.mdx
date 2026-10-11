@@ -30,7 +30,7 @@ This is the statement that gave dynamic SQL its reputation. The text changes wit
 
 The database does not know or care how the statement text came to exist. It hashes the text and looks it up in its cache. If an identical text is there, the cached plan is reused. If the text differs by a single character, it is a new statement. What matters is whether the text is stable, and the text is stable if values are passed as bind parameters rather than written into it. A statement built at runtime with `?` placeholders is as cacheable as one in a stored procedure, because the same inputs produce the same text.
 
-How a database decides whether it needs to plan is simple. Turning a statement into an execution plan is called a **hard parse**: the optimizer inspects the whole text, considers every index and every join order, and spends real CPU doing it. Finding a cached plan for the same text and reusing it after a few checks, access rights for instance, is a **soft parse** and costs almost nothing. The cache key is the statement text, usually a hash of it. A statement with a literal value only hits the cache when the identical value comes around again, and by then the plan has often been pushed out by the stream of other one-off statements. The [glossary](/sql/glossary/) has the terms; the [bind parameters lesson](/sql/where-clause/bind-parameters/) has the mechanism.
+How a database decides whether it needs to plan is simple. Turning a statement into an execution plan is called a **hard parse**: the optimizer inspects the whole text, considers every index and every join order, and spends real CPU doing it. Finding a cached plan for the same text and reusing it after a few checks, access rights for instance, is a **soft parse** and costs almost nothing. The cache key is the statement text, usually a hash of it. A statement with a literal value only hits the cache when the identical value comes around again, and by then the plan has often been pushed out by the stream of other one-off statements. The [execution plan appendix](/sql/explain-plan/) has the terms; the [bind parameters page](/sql/where-clause/bind-parameters/) has the mechanism.
 
 The slow case is the one the rule was meant to prevent, plus one it created. The static statement that handles every combination of optional filters looks like this:
 
@@ -42,7 +42,7 @@ SELECT *
    AND (date_of_birth = ? OR ? IS NULL);
 ```
 
-This is the smart-logic anti-pattern. The optimizer plans it once, without knowing which parameters will be null, and the plan has to work for every combination. No index can be relied on, because any of the conditions might be switched off, so the plan is a full table scan every time. [Unit 2 (the where clause)](/sql/where-clause/) has the full treatment of this query and why bind parameter peeking does not rescue it.
+This is the smart-logic anti-pattern. The optimizer plans it once, without knowing which parameters will be null, and the plan has to work for every combination. No index can be relied on, because any of the conditions might be switched off, so the plan is a full table scan every time. [Chapter 2 (the where clause)](/sql/where-clause/) has the full treatment of this query and why bind parameter peeking does not rescue it.
 
 ## What to do instead
 
@@ -96,4 +96,4 @@ Converting such code to dynamic SQL tends to move the `prepareStatement` call in
 
 That is also the one honest exception to the rule. A very cheap statement executed at very high frequency, where the parse is a measurable share of the total, can be faster as a single static statement, smart logic and all, than as a family of dynamic ones. It is rare, and it is measurable, so measure before assuming it.
 
-<Callout kind="note">There is a case where literal values beat bind parameters: a filter on a column with a badly skewed distribution, where the optimizer needs the actual value to pick between an index and a full scan. That is also dynamic SQL, and [Unit 2 (the where clause)](/sql/where-clause/) explains when it is worth it.</Callout>
+<Callout kind="note">There is a case where literal values beat bind parameters: a filter on a column with a badly skewed distribution, where the optimizer needs the actual value to pick between an index and a full scan. That is also dynamic SQL, and [Chapter 2 (the where clause)](/sql/where-clause/) explains when it is worth it.</Callout>

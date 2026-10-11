@@ -10,13 +10,11 @@ export interface NavItem {
   title: string;
   subtitle: string;
   depth: number;
-  minutes?: number;
-  /** "1", "1.2", … the lesson's position inside its chapter */
+  /** "1", "1.2", … the page's position inside its chapter */
   label: string;
-  kind: 'lesson' | 'practice' | 'quiz';
 }
 
-/** 1 → "1", 1.2 → "1.2" (frontmatter `order` is a decimal for grouped lessons). */
+/** 1 → "1", 1.2 → "1.2" (frontmatter `order` is a decimal for grouped pages). */
 export function orderLabel(order: number): string {
   return Number.isInteger(order) ? String(order) : order.toFixed(1);
 }
@@ -43,9 +41,7 @@ export function toNavItem(l: Lesson): NavItem {
     title: l.data.title,
     subtitle: l.data.subtitle,
     depth: l.id.split('/').length - 1,
-    minutes: l.data.minutes,
     label: orderLabel(l.data.order),
-    kind: l.data.kind,
   };
 }
 

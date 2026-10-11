@@ -5,7 +5,8 @@
  *   <Fragment slot="postgresql">...</Fragment>
  *   <Fragment slot="mysql">...</Fragment>
  * </EngineTabs>
- * The tab matching the reader's chosen engine (header picker) opens first.
+ * Clicking a tab switches every tab group on the page to that engine, so the
+ * reader picks once. Nothing is stored.
  */
 import { engines } from '../../lib/site';
 const present = engines.filter((e) => Astro.slots.has(e.id));
@@ -29,18 +30,12 @@ const uid = Math.random().toString(36).slice(2, 8);
   ))}
 </div>
 <script>
-  import { getEngine, setEngine } from '../../lib/prefs';
   const groups = document.querySelectorAll<HTMLElement>('[data-engine-tabs]');
   const show = (g: HTMLElement, id: string) => {
     const tabs = g.querySelectorAll<HTMLButtonElement>('[role=tab]');
-    const has = [...tabs].some((t) => t.dataset.engine === id);
-    const target = has ? id : tabs[0]?.dataset.engine;
-    tabs.forEach((t) => t.setAttribute('aria-selected', t.dataset.engine === target ? 'true' : 'false'));
-    g.querySelectorAll<HTMLElement>('[role=tabpanel]').forEach((p) => { p.hidden = p.dataset.engine !== target; });
+    if (![...tabs].some((t) => t.dataset.engine === id)) return;
+    tabs.forEach((t) => t.setAttribute('aria-selected', t.dataset.engine === id ? 'true' : 'false'));
+    g.querySelectorAll<HTMLElement>('[role=tabpanel]').forEach((p) => { p.hidden = p.dataset.engine !== id; });
   };
-  groups.forEach((g) => {
-    show(g, getEngine());
-    g.querySelectorAll<HTMLButtonElement>('[role=tab]').forEach((t) => t.addEventListener('click', () => setEngine(t.dataset.engine!)));
-  });
-  window.addEventListener('util:engine', (ev) => { const id = (ev as CustomEvent<string>).detail; groups.forEach((g) => show(g, id)); });
+  groups.forEach((g) => g.querySelectorAll<HTMLButtonElement>('[role=tab]').forEach((t) => t.addEventListener('click', () => groups.forEach((x) => show(x, t.dataset.engine!)))));
 </script>

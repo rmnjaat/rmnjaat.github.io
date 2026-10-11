@@ -1,6 +1,6 @@
 ---
 title: About this site
-subtitle: Who wrote the original, what the book is, and what this rewritten learning edition adds and leaves out.
+subtitle: Who wrote the original, what the book is, and what this rewritten edition adds and leaves out.
 section: about
 order: 0
 summary: Credits for Markus Winand and SQL Performance Explained, what use-the-index-luke.com offers, how this site relates to it, which database versions the material was tested on, and where to buy the book.
@@ -21,30 +21,30 @@ He works as a trainer, speaker and consultant through [winand.at](https://winand
 
 The book is for developers. Its premise is that indexing is the one part of database tuning that developers have to own, because the people who know the queries are the only people who can index for them, and it covers everything a developer needs to know about indexes and nothing else: B-tree indexes only, no storage configuration, no hardware. It uses Oracle terminology throughout and gives the equivalent terms and behaviour for MySQL, PostgreSQL and SQL Server in side notes; the web edition later added Db2 (LUW) and SQLite to the execution plan and example script appendices.
 
-Its structure is eight chapters and three appendices, and this site follows it unit for unit:
+Its structure is eight chapters and three appendices, and this site follows it chapter for chapter:
 
 | Book | This site |
 | --- | --- |
 | Preface | [Preface](/sql/preface/) |
-| Chapter 1, Anatomy of an Index | [Unit 1](/sql/anatomy/) |
-| Chapter 2, The Where Clause | [Unit 2](/sql/where-clause/) |
-| Chapter 3, Performance and Scalability | [Unit 3](/sql/testing-scalability/) |
-| Chapter 4, The Join Operation | [Unit 4](/sql/join/) |
-| Chapter 5, Clustering Data | [Unit 5](/sql/clustering/) |
-| Chapter 6, Sorting and Grouping | [Unit 6](/sql/sorting-grouping/) |
-| Chapter 7, Partial Results | [Unit 7](/sql/partial-results/) |
-| Chapter 8, Insert, Delete and Update | [Unit 8](/sql/dml/) |
+| Chapter 1, Anatomy of an Index | [Chapter 1](/sql/anatomy/) |
+| Chapter 2, The Where Clause | [Chapter 2](/sql/where-clause/) |
+| Chapter 3, Performance and Scalability | [Chapter 3](/sql/testing-scalability/) |
+| Chapter 4, The Join Operation | [Chapter 4](/sql/join/) |
+| Chapter 5, Clustering Data | [Chapter 5](/sql/clustering/) |
+| Chapter 6, Sorting and Grouping | [Chapter 6](/sql/sorting-grouping/) |
+| Chapter 7, Partial Results | [Chapter 7](/sql/partial-results/) |
+| Chapter 8, Insert, Delete and Update | [Chapter 8](/sql/dml/) |
 | Appendix A, Execution Plans | [Execution Plans](/sql/explain-plan/) |
 | Appendix B, Myth Directory | [Myth Directory](/sql/myth-directory/) |
 | Appendix C, Example Schema | [Example Schema](/sql/example-schema/) |
-| Glossary | [Glossary](/sql/glossary/) |
+| Glossary | Terms are explained in the chapter that introduces them; the [original glossary](https://use-the-index-luke.com/sql/glossary) remains the reference list |
 
 The web edition exists in English, German and Spanish in full, and in French and Japanese for most of the chapters. Its example scripts were tested on PostgreSQL 9.0, MySQL 5.1, Oracle 11g Release 2, SQL Server 2008 R2, Db2 (LUW) 9.7 through 11.5, SQLite and Gupta SQLBase 11.7; the execution plan appendix for PostgreSQL states that it applies to PostgreSQL 12 and later. The site also hosts a [three-minute quiz](https://use-the-index-luke.com/3-minute-quiz) with versions for each database; of the first 28,000 people who took it, 40 percent passed.
 
 ## What this site is
 
-This is a rewritten, extended learning edition of that material. It follows the book's structure chapter by chapter and lesson by lesson, and it sets out to cover every fact, example, figure and warning the original teaches, so that a reader who finishes a unit here has met everything in the corresponding chapter there. The text, however, is written from scratch. The original wording is the author's copyright and is not reproduced here; SQL statements, plan output, operation names and the example schema are not prose and may match. Each page links to the page of the original it rewrites, and the [site map](/sql/about/site-map/) lists every page of the original and where its content lives here.
+This is a rewritten edition of that material. It follows the book's structure chapter by chapter and page by page, and it sets out to cover every fact, example, figure and warning the original teaches, so that a reader who finishes a chapter here has met everything in the corresponding chapter there. The text, however, is written from scratch. The original wording is the author's copyright and is not reproduced here; SQL statements, plan output, operation names and the example schema are not prose and may match. Each page links to the page of the original it rewrites, and the [site map](/sql/about/site-map/) lists every page of the original and where its content lives here.
 
-What is added is the apparatus of a course: a SQLite [playground](/playground/) on every lesson that runs the examples in the browser and shows their plans, interactive figures of the B-tree, the leaf chain, the join algorithms and paging, tasks with hints and solutions, a check question at the end of each lesson, practice sets and unit checks, and a [placement quiz](/sql/about/quiz/). Where an engine has changed since the book was written, for example PostgreSQL enabling `BUFFERS` by default or MySQL gaining `EXPLAIN ANALYZE` and hash joins, the reference pages describe the current behaviour and say which version introduced it.
+What is added: step-by-step figures of the B-tree, the leaf chain, the join algorithms and paging, a summary at the end of each page, and a SQLite column in the execution plan appendix. Where an engine has changed since the book was written, for example PostgreSQL enabling `BUFFERS` by default or MySQL gaining `EXPLAIN ANALYZE` and hash joins, the reference pages describe the current behaviour and say which version introduced it.
 
 What is left out is everything that is not the book: the blog, which is news and opinion from its time; the shop; the training offers; the legal pages. The site map lists them with links to the originals. If this site is useful to you, the way to support the work it is built on is to [buy the book](https://sql-performance-explained.com/) or to read the [original](https://use-the-index-luke.com/).

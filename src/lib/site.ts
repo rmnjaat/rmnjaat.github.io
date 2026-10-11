@@ -24,11 +24,11 @@ export const chapters: Chapter[] = [
   { slug: 'partial-results', n: 7, title: 'Partial Results', tagline: 'Paging efficiently',
     intro: 'Most screens show the first few rows and let the user page or scroll for more. Sorting every row to find the newest ten is where such queries fall over; a pipelined ORDER BY has almost no startup cost and can stop after a handful of rows. The syntax for saying so differs from engine to engine, but underneath they all execute these queries in much the same way.' },
   { slug: 'dml', n: 8, title: 'Insert, Delete and Update', tagline: 'What indexes cost on writes',
-    intro: 'Insert, delete and update make up the data manipulation language, and indexes mostly make them slower. An index is pure redundancy, a copy of data that is also in the table, and every write has to keep each copy consistent, so a statement that changes the table also changes every index holding the affected data. This unit measures that cost and shows where the where clause still helps.' },
+    intro: 'Insert, delete and update make up the data manipulation language, and indexes mostly make them slower. An index is pure redundancy, a copy of data that is also in the table, and every write has to keep each copy consistent, so a statement that changes the table also changes every index holding the affected data. This chapter measures that cost and shows where the where clause still helps.' },
 ];
 
 export interface RefSection {
-  slug: 'explain-plan' | 'myth-directory' | 'glossary' | 'example-schema' | 'about';
+  slug: 'explain-plan' | 'myth-directory' | 'example-schema' | 'about';
   title: string;
   tagline: string;
   intro: string;
@@ -39,7 +39,6 @@ export const referenceSections: RefSection[] = [
     intro: 'Before a database runs a statement, its optimizer compiles the SQL into an execution plan, the way a compiler turns source code into a program. That plan is the first thing to look at when a statement is slow, because it shows which indexes were used, in what order the tables were joined and where the time goes. One page per engine, plus Gupta SQLBase: how to get the plan, what the operations mean, and how to tell access predicates from filter predicates.' },
   { slug: 'myth-directory', title: 'Myth Directory', tagline: 'Common misbeliefs, debunked',
     intro: 'Advice that sounds right, gets repeated, and makes SQL slower.' },
-  { slug: 'glossary', title: 'Glossary', tagline: 'Terms used throughout the book', intro: '' },
   { slug: 'example-schema', title: 'Example Schema', tagline: 'The tables every example uses', intro: '' },
   { slug: 'about', title: 'About', tagline: 'The book, the author, this site', intro: '' },
 ];
@@ -56,15 +55,3 @@ export const engines: Engine[] = [
 
 export const siteName = 'Use The Index, Luke';
 export const siteTagline = 'SQL indexing for developers';
-export const courseFacts = { level: 'Intermediate', levelNote: 'you write SQL already', hours: 'About 6 hours' };
-export const outcomes = [
-  'Read an execution plan and say whether an index helped',
-  'Choose the column order of a multi-column index from the queries',
-  'Fix the ways a where clause hides a column from its index',
-  'Index for joins, sorting and paging, not only for lookups',
-];
-export const prereqs = [
-  'You can write SELECT with WHERE, JOIN and ORDER BY',
-  'You have a database you can run EXPLAIN on, or use the built-in playground',
-  'No DBA experience needed',
-];

@@ -1,84 +1,13 @@
 ---
 import Base from '../layouts/Base.astro';
-import { chapters, siteName, courseFacts, outcomes, prereqs } from '../lib/site';
-import { getOrderedLessons, toNavItem } from '../lib/nav';
-const lessons = await getOrderedLessons();
-const items = lessons.map(toNavItem);
-const byChapter = new Map(chapters.map((c) => [c.slug, [] as typeof items]));
-for (const it of items) byChapter.get(it.id.split('/')[0])?.push(it);
-const totals = { lessons: items.filter((i) => i.kind === 'lesson').length, practice: items.filter((i) => i.kind === 'practice').length, quiz: items.filter((i) => i.kind === 'quiz').length };
-const first = items[0];
+import Contents from '../components/ui/Contents.astro';
+import { siteName } from '../lib/site';
 ---
-<Base title={siteName} current="course">
-  <div class="home">
-    <div>
-      <h1>SQL indexing for developers</h1>
-      <p class="sub">Learn how a database finds your rows, why some queries are slow even with an index, and how to design indexes from the queries you actually write. Vendor-neutral, with PostgreSQL, MySQL, Oracle, SQL Server and Db2 notes, and a database in your browser to try everything on.</p>
-      <div class="facts">
-        <span><b>{courseFacts.level}</b> · {courseFacts.levelNote}</span>
-        <span><b>{totals.lessons} lessons</b> · {chapters.length} units</span>
-        <span><b>{courseFacts.hours}</b></span>
-        <span><b>{totals.practice} practice sets</b> · {totals.quiz} unit checks</span>
-      </div>
-      <div class="twocol">
-        <div class="box"><h3>You'll be able to</h3><ul>{outcomes.map((o) => <li>{o}</li>)}</ul></div>
-        <div class="box"><h3>Before you start</h3><ul>{prereqs.map((o) => <li>{o}</li>)}</ul></div>
-      </div>
-      <div class="units" id="units">
-        <h2>Units</h2>
-        {chapters.map((c) => {
-          const list = byChapter.get(c.slug) ?? [];
-          const min = list.reduce((a, l) => a + (l.minutes ?? 0), 0);
-          const single = list.length === 1 && list[0].id === c.slug;
-          return (
-            <div class={`unitcard ${c.n <= 1 ? 'open' : ''}`} data-unit={c.slug}>
-              <button type="button" aria-expanded={c.n <= 1 ? 'true' : 'false'}>
-                <span class="un">{String(c.n).padStart(2, '0')}</span>
-                <span><span class="ut">{c.title}</span><br /><span class="ud">{c.tagline} · {list.length} {list.length === 1 ? 'item' : 'items'} · {min} min</span></span>
-                <span class="up"><span data-unit-count>0/{list.length}</span><span class="bar"><i data-unit-bar></i></span></span>
-              </button>
-              <ol>
-                {!single && <li class="t-lesson"><span class="ic" style="border:0"></span><span><a href={`/sql/${c.slug}/`} style="color: var(--mute)">Unit overview</a></span><span></span></li>}
-                {list.map((l) => (
-                  <li class={`t-${l.kind}`} data-id={l.id}><span class="ic" aria-hidden="true"></span><span><a href={l.href}>{l.title}</a>{l.kind !== 'lesson' && <span class="ty">{l.kind}</span>}</span><span class="mn">{l.minutes} min</span></li>
-                ))}
-              </ol>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-    <aside class="cont" aria-label="Continue">
-      <h3>Continue</h3>
-      <div class="ct" id="cont-title">{first?.title}</div>
-      <div class="cs" id="cont-sub">Start with unit 0</div>
-      <div class="bar"><i id="cont-bar"></i></div>
-      <div class="stats" id="cont-stats"><div><b>0</b>items done</div><div><b>0</b>practice</div><div><b>0%</b>of course</div></div>
-      <a class="btn primary" id="cont-link" href={first ? first.href : '/sql/'}>Start the course</a>
-      <div class="cs" id="cont-last"></div>
-    </aside>
+<Base title={siteName} current="contents">
+  <div class="wrap home">
+    <h1>SQL indexing for developers</h1>
+    <p class="sub">How a database finds your rows, why some queries are slow even with an index, and how to design indexes from the queries you write. Vendor-neutral, with notes for PostgreSQL, MySQL, Oracle, SQL Server, Db2 and SQLite.</p>
+    <p class="sub small">A rewritten edition of Markus Winand's <a href="https://use-the-index-luke.com" rel="noopener">Use The Index, Luke</a>. Read it front to back, or jump to the chapter you need.</p>
+    <Contents />
   </div>
 </Base>
-<script>
-  import { getLast, getDone } from '../lib/prefs';
-  const done = getDone();
-  const total = Number(document.body.dataset.totalItems || 0);
-  document.querySelectorAll<HTMLElement>('.unitcard[data-unit]').forEach((u) => {
-    const items = [...u.querySelectorAll<HTMLElement>('li[data-id]')];
-    items.forEach((li) => li.classList.toggle('done', done.has(li.dataset.id!)));
-    const n = items.filter((li) => done.has(li.dataset.id!)).length;
-    const c = u.querySelector('[data-unit-count]'); if (c) c.textContent = `${n}/${items.length}`;
-    const b = u.querySelector<HTMLElement>('[data-unit-bar]'); if (b) b.style.width = items.length ? `${(n / items.length) * 100}%` : '0';
-  });
-  document.querySelectorAll<HTMLButtonElement>('.unitcard > button').forEach((b) => b.addEventListener('click', () => { const open = b.parentElement!.classList.toggle('open'); b.setAttribute('aria-expanded', String(open)); }));
-  const last = getLast();
-  if (last) {
-    (document.getElementById('cont-title')!).textContent = last.title;
-    (document.getElementById('cont-sub')!).textContent = 'Where you left off';
-    const a = document.getElementById('cont-link') as HTMLAnchorElement; a.href = last.href; a.textContent = 'Continue';
-  }
-  const practiceDone = [...done].filter((id) => document.querySelector(`li.t-practice[data-id="${CSS.escape(id)}"]`)).length;
-  const pct = total ? Math.round((done.size / total) * 100) : 0;
-  (document.getElementById('cont-bar') as HTMLElement).style.width = pct + '%';
-  (document.getElementById('cont-stats')!).innerHTML = `<div><b>${done.size}</b>items done</div><div><b>${practiceDone}</b>practice</div><div><b>${pct}%</b>of course</div>`;
-</script>

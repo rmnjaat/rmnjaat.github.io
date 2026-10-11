@@ -3,23 +3,15 @@ title: Preface
 subtitle: SQL hides how the database works, and that works right up to the moment a query is slow. The one thing a developer then needs is indexing, and nobody else can do it for them.
 chapter: preface
 order: 1
-kind: lesson
-minutes: 7
-summary: Why SQL performance problems still happen, why indexing is a development task rather than an administration task, which databases and which index type the book covers, and how the units of this site fit together.
-prereqs: "None. You should write SQL now and then, through an ORM or by hand; nothing about database internals is assumed."
-outcomes:
-  - Why SQL's separation of "what" from "how" leaves performance as the developer's problem
-  - Why the information an index needs lives in the application, which makes indexing a development task
-  - Which index type and which databases the book covers, and what terminology it uses
-  - How the eight units after this one and the reference pages build on each other
+summary: Why SQL performance problems still happen, why indexing is a development task rather than an administration task, which databases and which index type the book covers, and how the chapters of this site fit together.
 recap:
   - SQL says what you want, not how to get it. That abstraction stops at performance, so the author of a statement has to know a little about how it runs.
   - The decisive input for an index is the access path, how the application queries the data. Developers have it. Administrators and consultants have to reverse-engineer it.
-  - The book covers the B-tree index and nothing else. It applies to Oracle, MySQL, PostgreSQL, SQL Server and Db2; the playgrounds here run SQLite.
-  - Read the units in order. Unit 1 is short and must not be skipped; unit 2, the where clause, is the main body.
+  - The book covers the B-tree index and nothing else. It applies to Oracle, MySQL, PostgreSQL, SQL Server and Db2, and the plan appendix adds SQLite.
+  - Read the chapters in order. Chapter 1 is short and must not be skipped; chapter 2, the where clause, is the main body.
 source: https://use-the-index-luke.com/sql/preface
 ---
-import { Callout, KeyIdea, Check } from '@/components/mdx';
+import { Callout, KeyIdea } from '@/components/mdx';
 
 Performance complaints are as old as SQL. In the early years there was something to them; today the engines are fast, and yet slow statements are still an everyday sight. The reason is not the database. It is the division of labour around it, which quietly hands the one task that matters most to the people least equipped to do it.
 
@@ -53,37 +45,25 @@ A database administrator or an outside consultant can get at the access path onl
 
 Everything a developer needs to know about indexes, and nothing beyond that. In practice that means one index type, the **B-tree index**, because it is the default everywhere and the one that decides most of query performance. Hash indexes, bitmap indexes and full-text indexes are not covered.
 
-B-tree indexes behave almost identically from one database to the next, so the same lessons apply to Oracle, MySQL, PostgreSQL, SQL Server and Db2. The terminology, operation names such as `INDEX RANGE SCAN` and `TABLE ACCESS BY INDEX ROWID`, follows the Oracle database, with the other engines' names given where they differ. Vendor differences sit in tabs; pick your engine in the header and the matching tab opens first on every page.
+B-tree indexes behave almost identically from one database to the next, so the same pages apply to Oracle, MySQL, PostgreSQL, SQL Server and Db2. The terminology, operation names such as `INDEX RANGE SCAN` and `TABLE ACCESS BY INDEX ROWID`, follows the Oracle database, with the other engines' names given where they differ. Vendor differences sit in tabs; pick your engine in the header and the matching tab opens first on every page.
 
-<Callout kind="note" title="The playgrounds">Every lesson on this site has a live playground. It runs SQLite inside your browser with the [example schema](/sql/example-schema/) loaded: a thousand employees in three subsidiaries and twenty thousand sales. SQLite is not one of the five engines the book is written for, but its indexes are the same B-trees and its plans show the same difference between a search and a scan, which is what the exercises are about.</Callout>
 
 ## 5. How it is organised
 
-The units follow the parts of an SQL statement, in the order a developer meets them. Read them in sequence the first time; each one relies on the vocabulary of the one before.
+The chapters follow the parts of an SQL statement, in the order a developer meets them. Read them in sequence the first time; each one relies on the vocabulary of the one before.
 
-- [Unit 1, Anatomy of an Index](/sql/anatomy/), is the only unit that is not about SQL. It explains the structure of an index, and it is deliberately short, about eight printed pages in the book. Do not skip it: by the end of it you can already explain why an index can be slow.
-- [Unit 2, The Where Clause](/sql/where-clause/), is the main body of the course. It goes from a single-column equality lookup to ranges, `LIKE`, functions and the special cases, and it is where most of the speed-up comes from.
-- [Unit 3, Testing and Scalability](/sql/testing-scalability/), is a detour into measurement: what data volume and system load do to response time, and why more hardware is rarely the answer to a slow query.
-- [Unit 4, The Join Operation](/sql/join/), returns to SQL and shows how indexes make each join algorithm fast.
-- [Unit 5, Clustering Data](/sql/clustering/), answers whether it matters if you select one column or all of them, and shows a trick that goes further.
-- [Unit 6, Sorting and Grouping](/sql/sorting-grouping/), shows that `ORDER BY` and `GROUP BY` can use an index too.
-- [Unit 7, Partial Results](/sql/partial-results/), is about pipelined execution: stopping early when you only need the first rows.
-- [Unit 8, Insert, Delete and Update](/sql/dml/), measures what every index costs on writes. Indexes are not free.
+- [Chapter 1, Anatomy of an Index](/sql/anatomy/), is the only chapter that is not about SQL. It explains the structure of an index, and it is deliberately short, about eight printed pages in the book. Do not skip it: by the end of it you can already explain why an index can be slow.
+- [Chapter 2, The Where Clause](/sql/where-clause/), is the main body of the book. It goes from a single-column equality lookup to ranges, `LIKE`, functions and the special cases, and it is where most of the speed-up comes from.
+- [Chapter 3, Testing and Scalability](/sql/testing-scalability/), is a detour into measurement: what data volume and system load do to response time, and why more hardware is rarely the answer to a slow query.
+- [Chapter 4, The Join Operation](/sql/join/), returns to SQL and shows how indexes make each join algorithm fast.
+- [Chapter 5, Clustering Data](/sql/clustering/), answers whether it matters if you select one column or all of them, and shows a trick that goes further.
+- [Chapter 6, Sorting and Grouping](/sql/sorting-grouping/), shows that `ORDER BY` and `GROUP BY` can use an index too.
+- [Chapter 7, Partial Results](/sql/partial-results/), is about pipelined execution: stopping early when you only need the first rows.
+- [Chapter 8, Insert, Delete and Update](/sql/dml/), measures what every index costs on writes. Indexes are not free.
 
-The reference pages support the units: [Execution Plans](/sql/explain-plan/) shows how to ask each database what it did with a statement, the [Myth Directory](/sql/myth-directory/) collects advice that sounds right and is not, the [Example Schema](/sql/example-schema/) has the `CREATE` and `INSERT` statements behind every example, the [glossary](/sql/glossary/) defines the terms used throughout, and [About](/sql/about/) says where this site comes from.
+The reference pages support the chapters: [Execution Plans](/sql/explain-plan/) shows how to ask each database what it did with a statement, the [Myth Directory](/sql/myth-directory/) collects advice that sounds right and is not, the [Example Schema](/sql/example-schema/) has the `CREATE` and `INSERT` statements behind every example, each term is explained in the chapter that introduces it, and [About](/sql/about/) says where this site comes from.
 
-<Callout kind="tip" title="Before you start">If you want to know where you stand, the [three-minute quiz](/sql/about/quiz/) asks five questions about SQL performance. The author also gave a talk on the same material, "Indexes: the neglected performance all-rounder"; the [slides](https://www.slideshare.net/slideshow/indexes-neglectedperformanceallrounder/24103160) are a one-page version of this book.</Callout>
+<Callout kind="tip" title="One-page version">The author also gave a talk on the same material, "Indexes: the neglected performance all-rounder"; the [slides](https://www.slideshare.net/slideshow/indexes-neglectedperformanceallrounder/24103160) are a one-page version of this book.</Callout>
 
 Start with [the leaf nodes](/sql/anatomy/the-leaf-nodes/).
 
-<Check
-  client:visible
-  question="According to the preface, what is the single most important piece of information for choosing a good index?"
-  options={[
-    'The storage configuration and hardware of the production server.',
-    'How the application queries the data: the columns in the where clause, the ordering, the typical result size.',
-    'The size of the table in gigabytes.',
-  ]}
-  answer={1}
-  explain="An index has to fit the access path, and the access path is decided in application code. That is why the book treats indexing as a development task: developers have that information without reverse-engineering anything."
-/>

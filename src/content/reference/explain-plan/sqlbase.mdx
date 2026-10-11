@@ -52,7 +52,7 @@ Joins are processed two tables at a time; a statement with several joins runs th
 | `MERGE JOIN` | A sort-merge join. SQLBase only chooses it when both join columns are indexed, so that neither side needs a sort. |
 | `HASH JOIN` | A hash join: one side is loaded into a hash table, the other probes it. No index on the join columns is involved. |
 
-Sorting and grouping do not appear in the plan at all. There is no line for a sort and none for an aggregate. The only way to tell whether an `ORDER BY` was sorted or delivered from an index is to look at the `INDEX` column of the table access and compare with the index definition. `CREATE INDEX` accepts `ASC` and `DESC` per column, so an index can be built to match a mixed-direction `ORDER BY` as described in the [sorting lesson](/sql/sorting-grouping/order-by-asc-desc-nulls-last/).
+Sorting and grouping do not appear in the plan at all. There is no line for a sort and none for an aggregate. The only way to tell whether an `ORDER BY` was sorted or delivered from an index is to look at the `INDEX` column of the table access and compare with the index definition. `CREATE INDEX` accepts `ASC` and `DESC` per column, so an index can be built to match a mixed-direction `ORDER BY` as described in the [sorting page](/sql/sorting-grouping/order-by-asc-desc-nulls-last/).
 
 Top-N queries are controlled by session settings rather than by SQL syntax.
 
@@ -70,7 +70,7 @@ SET LIMIT OFF;
 
 The original appendix has no page on this topic for SQLBase, because the plan offers nothing to read: there is no predicate section, no key length, and no distinction between conditions that bound the index scan and conditions that are checked on every entry. The split still exists in the engine, since a B-tree can only be entered through its leading columns, and you have to reconstruct it from the index definition.
 
-Apply the same rule as everywhere else. Take the index named in the `INDEX` column and walk its columns from the left. Every column that has an equality condition in the where clause is an access predicate; the first column with a range condition (`<`, `>`, `BETWEEN`, `LIKE 'abc%'`) is the last access predicate; everything after that, and every column the where clause skips, is a filter that the engine evaluates on each entry in the range. The [range lesson](/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates/) explains why the order matters and the [myth about selectivity](/sql/myth-directory/most-selective-first/) explains why it is not fixed by column statistics.
+Apply the same rule as everywhere else. Take the index named in the `INDEX` column and walk its columns from the left. Every column that has an equality condition in the where clause is an access predicate; the first column with a range condition (`<`, `>`, `BETWEEN`, `LIKE 'abc%'`) is the last access predicate; everything after that, and every column the where clause skips, is a filter that the engine evaluates on each entry in the range. The [range page](/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates/) explains why the order matters and the [myth about selectivity](/sql/myth-directory/most-selective-first/) explains why it is not fixed by column statistics.
 
 <Callout kind="important" title="Verify by timing, not by reading">Because the plan cannot confirm your reconstruction, test it. Run the statement with the condition you believe to be the access predicate alone, then with the full where clause, and compare response times as the table grows. If the full query is not much faster than the partial one, the extra condition is a filter.</Callout>
 
@@ -83,4 +83,4 @@ UPDATE STATISTICS ON TABLE employees;
 UPDATE STATISTICS ON INDEX employees_pk;
 ```
 
-Run both after loading data or creating an index; without statistics the choice between a loop join with index and a simple loop join is a guess. Then time the statement in SQLTalk with a realistic data volume. The scaling behaviour described in [unit 3](/sql/testing-scalability/) applies unchanged: a query whose time grows with the table size is reading a filtered range or scanning, whatever the `INDEX` column says.
+Run both after loading data or creating an index; without statistics the choice between a loop join with index and a simple loop join is a guess. Then time the statement in SQLTalk with a realistic data volume. The scaling behaviour described in [chapter 3](/sql/testing-scalability/) applies unchanged: a query whose time grows with the table size is reading a filtered range or scanning, whatever the `INDEX` column says.

@@ -3,16 +3,7 @@ title: Date Types
 subtitle: Most obfuscations involve dates. Truncating, formatting or string-comparing a date column hides it from its index; an explicit range on the bare column does not.
 chapter: where-clause
 order: 7.1
-kind: lesson
-minutes: 10
 summary: Why TRUNC(sale_date) and DATE_FORMAT(sale_date) cannot use an index on sale_date, when a function-based index helps and when it does not, how to write continuous periods as explicit range conditions with helper functions for each database, why comparing dates as strings is the same mistake, and why LIKE on a date is an obfuscation in disguise.
-prereqs: "You should have read <a href='/sql/where-clause/functions/case-insensitive-search/'>Case-Insensitive Search</a> and <a href='/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates/'>Greater, Less and BETWEEN</a>."
-outcomes:
-  - Why TRUNC and date formatting functions block an index on the column
-  - When a function-based index on the date expression is and is not a good idea
-  - How to write any continuous period as an explicit range condition
-  - Why comparing dates as strings converts the column, and how to convert the search term instead
-  - Why LIKE on a date column is an obfuscation although it uses no function
 recap:
   - Oracle's DATE always has a time component; TRUNC does not remove it, it sets it to midnight, and TRUNC(sale_date) is a different thing from sale_date.
   - A function-based index on TRUNC(sale_date) works only if every query uses TRUNC; used inconsistently you need two indexes.
@@ -21,7 +12,7 @@ recap:
   - LIKE forces a string comparison and converts the date column just like a function would.
 source: https://use-the-index-luke.com/sql/where-clause/obfuscation/dates
 ---
-import { Callout, KeyIdea, EngineTabs, Check, TryIt } from '@/components/mdx';
+import { Callout, KeyIdea, EngineTabs } from '@/components/mdx';
 
 Most obfuscated conditions involve dates. Oracle is especially exposed because its `DATE` type always carries a time component, so people reach for a function to get rid of it. The function is what hides the column from its index.
 
@@ -251,35 +242,3 @@ filter( INTERNAL_FUNCTION(SALE_DATE)
 
 <Callout kind="warning" title="Common mistake">Thinking that a condition without a visible function is safe. `LIKE` on a date, or any comparison between a date column and a string, can add a conversion you never wrote. If the plan shows `INTERNAL_FUNCTION`, `CAST` or `TO_CHAR` around the column, that is the obfuscation.</Callout>
 
-## 6. Try it
-
-SQLite keeps dates as ISO strings, and its date function `strftime` plays the role of `DATE_FORMAT` here. The playground has an index on `sale_date`.
-
-<TryIt id="2.7.1" tasks={[
-  { text: 'Run the query. 938 sales, and the plan is a <code>SCAN</code>: the function on <code>sale_date</code> hides the column from the index.', sql: 'strftime', plan: '^SCAN sales' },
-  { text: 'Rewrite it as an explicit range for the same month, <code>sale_date &gt;= \'2024-06-01\' AND sale_date &lt; \'2024-07-01\'</code>. Same 938 sales, and the plan uses <code>sales_date</code> with both bounds.', sql: "sale_date\\s*>=\\s*'2024-06-01'\\s+and\\s+sale_date\\s*<\\s*'2024-07-01'", plan: 'sales_date \\(sale_date>\\? AND sale_date<\\?\\)' },
-  { text: 'Try a single day as a range: <code>&gt;= \'2024-06-15\' AND &lt; \'2024-06-16\'</code>. Same plan shape, 31 rows.', sql: "sale_date\\s*>=\\s*'2024-06-15'\\s+and\\s+sale_date\\s*<\\s*'2024-06-16'", plan: 'sale_date>\\? AND sale_date<\\?' },
-]} setup={`CREATE INDEX sales_date ON sales (sale_date); ANALYZE;`} sql={`SELECT count(*), sum(eur_value)
-  FROM sales
- WHERE strftime('%Y-%m', sale_date) = '2024-06';`}>
-  <Fragment slot="hints">
-    <details class="hint"><summary>Hint for task 2</summary><div class="d">The upper bound is the first day of the next month, excluded. That is the half-open form that needs no "one second before" arithmetic.</div></details>
-    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT count(&#42;), sum(eur&#95;value) FROM sales
- WHERE sale&#95;date &gt;= '2024-06-01' AND sale&#95;date &lt; '2024-07-01';
--- plan: SEARCH sales USING INDEX sales&#95;date (sale&#95;date&gt;? AND sale&#95;date&lt;?)
-SELECT count(&#42;), sum(eur&#95;value) FROM sales
- WHERE sale&#95;date &gt;= '2024-06-15' AND sale&#95;date &lt; '2024-06-16';</pre></div></details>
-  </Fragment>
-</TryIt>
-
-<Check
-  client:visible
-  question="sale_date is an Oracle DATE column with an index. Which condition finds yesterday's sales through the index?"
-  options={[
-    "TRUNC(sale_date) = TRUNC(sysdate - INTERVAL '1' DAY)",
-    "sale_date >= TRUNC(sysdate - INTERVAL '1' DAY) AND sale_date < TRUNC(sysdate)",
-    "TO_CHAR(sale_date, 'YYYY-MM-DD') = TO_CHAR(sysdate - 1, 'YYYY-MM-DD')",
-  ]}
-  answer={1}
-  explain="TRUNC and TO_CHAR wrap the column in a function, so the index on sale_date cannot be used. The explicit range leaves the column bare, covers every second of yesterday, and is served by a plain index as a range scan."
-/>

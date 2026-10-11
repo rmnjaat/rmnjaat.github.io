@@ -3,16 +3,7 @@ title: Over-Indexing
 subtitle: Every function-based index is a whole extra B-tree. Before adding one, check whether an existing index could do the job if the queries agreed on one expression.
 chapter: where-clause
 order: 2.3
-kind: lesson
-minutes: 6
 summary: Why indexing every expression is the wrong reflex, how UPPER and LOWER turn one case-insensitive search into two indexes, why one consistent access path lets one index serve many queries, and why the original data is usually the best thing to index.
-prereqs: "You should have read <a href='/sql/where-clause/functions/case-insensitive-search/'>Case-Insensitive Search</a> and know that a function-based index serves only the expression it was built on."
-outcomes:
-  - Why function-based indexes make redundant indexes easy to create
-  - Why an index on UPPER(last_name) is useless for a LOWER(last_name) search
-  - What every extra index costs on insert, update and delete
-  - How unifying the access path lets one index serve several queries
-  - Why indexing the original column is usually the better default
 recap:
   - Every index costs ongoing maintenance. Indexing every expression in sight is the wrong reflex, and function-based indexes make that mistake easy.
   - A search written with LOWER cannot use an index built on UPPER. Two spellings of the same question need two indexes.
@@ -20,13 +11,13 @@ recap:
   - Aim to index the original data. It is usually the most useful information an index can hold.
 source: https://use-the-index-luke.com/sql/where-clause/functions/over-indexing
 ---
-import { Callout, KeyIdea, EngineTabs, Check, TryIt } from '@/components/mdx';
+import { Callout, KeyIdea, EngineTabs } from '@/components/mdx';
 
 Once you know that any expression can be indexed, it is tempting to index all of them. Do not. Every index you add is a tree the database has to keep in step with the table, for as long as it exists, and function-based indexes are especially prone to one problem: they make it very easy to create two indexes that store the same information.
 
 ## 1. UPPER or LOWER, not both
 
-The case-insensitive search from the previous lesson can just as well be written with `LOWER`.
+The case-insensitive search from the previous page can just as well be written with `LOWER`.
 
 ```sql
 SELECT first_name, last_name, phone_number
@@ -34,7 +25,7 @@ SELECT first_name, last_name, phone_number
  WHERE LOWER(last_name) = LOWER('winand')
 ```
 
-Same question, same result, different expression. One index cannot serve both spellings: the index on `UPPER(last_name)` holds names in capitals and knows nothing about `LOWER(last_name)`. We could create a second index on `LOWER(last_name)`, but then every `INSERT`, `UPDATE` and `DELETE` on `employees` maintains two B-trees for what is, to the application, one search. [Unit 8](/sql/dml/) measures that cost. The way to get by with one index is to pick one function and use it everywhere.
+Same question, same result, different expression. One index cannot serve both spellings: the index on `UPPER(last_name)` holds names in capitals and knows nothing about `LOWER(last_name)`. We could create a second index on `LOWER(last_name)`, but then every `INSERT`, `UPDATE` and `DELETE` on `employees` maintains two B-trees for what is, to the application, one search. [Chapter 8](/sql/dml/) measures that cost. The way to get by with one index is to pick one function and use it everywhere.
 
 <KeyIdea>Unify the access path. When every query spells the condition the same way, one index serves them all.</KeyIdea>
 
@@ -99,32 +90,3 @@ Guessing which indexes earn their keep is as unreliable as guessing whether a qu
   </Fragment>
 </EngineTabs>
 
-## 4. Try it
-
-The playground has an index on `UPPER(last_name)` and nothing else beyond the primary key.
-
-<TryIt id="2.6" setup={`CREATE INDEX emp_up_name ON employees (UPPER(last_name));`} tasks={[
-  { text: 'Run the <code>LOWER</code> version of the search. The plan says <code>SCAN employees</code>: the <code>UPPER</code> index is of no use.', sql: 'lower\\s*\\(\\s*last_name\\s*\\)\\s*=', plan: '^SCAN employees' },
-  { text: 'Change both sides to <code>UPPER</code> and run it again. Same result set, but now <code>SEARCH employees USING INDEX emp_up_name</code>.', sql: 'upper\\s*\\(\\s*last_name\\s*\\)\\s*=', plan: 'USING INDEX emp_up_name' },
-]} sql={`SELECT first_name, last_name, phone_number
-  FROM employees
- WHERE LOWER(last_name) = LOWER('winand');`}>
-  <Fragment slot="hints">
-    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT first&#95;name, last&#95;name, phone&#95;number
-  FROM employees
- WHERE UPPER(last&#95;name) = UPPER('winand');
--- plan: SEARCH employees USING INDEX emp&#95;up&#95;name (&lt;expr&gt;=?)</pre></div></details>
-  </Fragment>
-</TryIt>
-
-<Check
-  client:visible
-  question="employees has an index on UPPER(last_name). A new report searches with LOWER(last_name). What is the best response?"
-  options={[
-    'Add an index on LOWER(last_name). Two indexes give the optimizer more choice.',
-    'Change the report to use UPPER(last_name), so the existing index serves it too.',
-    'Drop the UPPER index and rely on the full table scan; function-based indexes are expensive to maintain.',
-  ]}
-  answer={1}
-  explain="Both spellings ask the same question. A second index would store the same information in a second B-tree and be maintained on every write. Unifying the access path lets the existing index serve the new query at no extra cost. A function-based index costs little more to maintain than any other, so dropping it is no answer either."
-/>

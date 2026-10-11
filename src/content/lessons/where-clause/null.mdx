@@ -3,21 +3,14 @@ title: NULL in the Oracle Database
 subtitle: SQL's NULL is confusing enough. Oracle adds two twists of its own, treating the empty string as NULL and leaving all-NULL rows out of its indexes.
 chapter: where-clause
 order: 6
-kind: lesson
-minutes: 3
-summary: Why NULL is a placeholder rather than a value, how Oracle departs from the standard by treating an empty string as NULL, and what the three lessons on indexing NULL cover.
-prereqs: "You should know that SQL requires <code>IS NULL</code> instead of <code>= NULL</code>. This group is about Oracle; the other databases appear only as contrast."
-outcomes:
-  - Why NULL is not a value and no value can be NULL
-  - How Oracle treats the empty string and why that is dangerous
-  - What the three lessons of this group cover
+summary: Why NULL is a placeholder rather than a value, how Oracle departs from the standard by treating an empty string as NULL, and what the three pages on indexing NULL cover.
 recap:
   - The SQL standard defines NULL as a placeholder for a missing or unknown value, not as a value.
   - Oracle treats the empty string as NULL; a VARCHAR2 column never holds one.
-  - Oracle also leaves rows out of an index when every indexed column is NULL, which the next three lessons deal with.
+  - Oracle also leaves rows out of an index when every indexed column is NULL, which the next three pages deal with.
 source: https://use-the-index-luke.com/sql/where-clause/null
 ---
-import { Callout, KeyIdea, Check } from '@/components/mdx';
+import { Callout, KeyIdea } from '@/components/mdx';
 
 NULL causes confusion wherever SQL is used. The basic idea is simple enough: NULL stands for data that is missing. The details are not. You have to write `IS NULL` instead of `= NULL`, for one thing. Oracle then adds two peculiarities of its own, one because it does not always follow the standard, and one because of how it handles NULL in indexes.
 
@@ -58,9 +51,9 @@ Every programming language that has both keeps the empty string and null apart. 
 
 <KeyIdea>In Oracle, NULL is not a value, and the empty string is NULL.</KeyIdea>
 
-<Callout kind="note" title="Elsewhere">PostgreSQL, SQL Server, MySQL, Db2 and SQLite keep NULL and the empty string apart, and they store NULL in B-tree indexes like any other key. The next three lessons are about Oracle, with the other databases as contrast.</Callout>
+<Callout kind="note" title="Elsewhere">PostgreSQL, SQL Server, MySQL, Db2 and SQLite keep NULL and the empty string apart, and they store NULL in B-tree indexes like any other key. The next three pages are about Oracle, with the other databases as contrast.</Callout>
 
-## 3. The three lessons
+## 3. The three pages
 
 [Indexing NULL](/sql/where-clause/null/index/): every Oracle index is a partial index, and what that does to `IS NULL` queries.
 
@@ -68,14 +61,3 @@ Every programming language that has both keeps the empty string and null apart. 
 
 [Emulating Partial Indexes](/sql/where-clause/null/partial-index/): turning the NULL rule into a partial index with a function-based index.
 
-<Check
-  client:visible
-  question="In Oracle, what does INSERT INTO t (name) VALUES ('') store in the VARCHAR2 column name?"
-  options={[
-    'An empty string, as in every other database',
-    'NULL, because Oracle treats the empty string as NULL',
-    'A single space',
-  ]}
-  answer={1}
-  explain="A VARCHAR2 column in Oracle never holds an empty string; the insert stores NULL, which is why '' IS NULL is true there and why a row inserted this way is absent from a single-column index on that column."
-/>

@@ -3,16 +3,7 @@ title: Hash Join
 subtitle: Build a hash table from one side, probe it with the other. An index on the join columns does nothing here. What helps is fewer rows and fewer columns going into the hash table, which is hard to get out of an ORM.
 chapter: join
 order: 2
-kind: lesson
-minutes: 11
 summary: "How the hash join builds and probes, why indexes on join columns are useless for it and only independent where conditions should be indexed, why the hash table must fit in memory, and how selecting fewer columns (partial objects in JPA, Hibernate, DBIx::Class and Doctrine) shrinks it."
-prereqs: "You should have read <a href='/sql/join/nested-loops-join-n1-problem/'>Nested loops</a> and know what an independent where condition is: one that refers to a single table."
-outcomes:
-  - How the hash join replaces per-row tree traversals with one in-memory hash table
-  - Why the join columns do not need an index, and which conditions do
-  - Why the same indexes serve a hash join whichever side ends up hashed
-  - How fewer rows and fewer columns shrink the hash table, and why the memory footprint is what counts
-  - How to load partial objects in JPA, Hibernate, DBIx::Class and Doctrine
 recap:
   - Hash join loads the candidate rows of one side, ideally the smaller, into an in-memory hash table keyed by the join columns, then reads the other side once and probes.
   - Indexing the join columns does not help a hash join. Index the independent where conditions on each table instead; that works whichever side is hashed.
@@ -21,7 +12,7 @@ recap:
   - "A hash join needs at least one equality condition to hash on. Range conditions in the join predicate become filters after the probe; a join with no equality at all usually falls back to nested loops. MySQL has hash joins since 8.0.18."
 source: https://use-the-index-luke.com/sql/join/hash-join-partial-objects
 ---
-import { Callout, KeyIdea, Check, Joins, EngineTabs, TryIt } from '@/components/mdx';
+import { Callout, KeyIdea, Joins, EngineTabs } from '@/components/mdx';
 
 The hash join goes after the weak point of nested loops: one B-tree traversal for every driving row. Instead of looking rows up one at a time, it loads the candidate rows from one side into a hash table and probes that table for each row of the other side. Tuning it takes a completely different indexing approach, and there is a second lever, selecting fewer columns, that most ORM tools make difficult to pull.
 
@@ -45,7 +36,7 @@ SELECT *
  WHERE s.sale_date > trunc(sysdate) - INTERVAL '6' MONTH
 ```
 
-The condition on `sale_date` is the only **independent** where condition, meaning it mentions a single table and plays no part in the join. Without any index the plan is two full table scans. The plans in this lesson come from the book's data volume, 10,000 employees and one million sales, not from the 1,000 and 20,000 rows of the playground.
+The condition on `sale_date` is the only **independent** where condition, meaning it mentions a single table and plays no part in the join. Without any index the plan is two full table scans. The plans in this page come from the book's data volume, 10,000 employees and one million sales.
 
 <EngineTabs>
   <Fragment slot="oracle">
@@ -331,38 +322,3 @@ Doctrine adds the `subsidiary_id` and `employee_id` of `sales` once more. The ob
 
 The hash table is keyed by the join columns, so it can only answer "is there a row with exactly this key". A hash join therefore needs at least one equality condition to hash on. Further range conditions in the join predicate, `s.sale_date BETWEEN e.start_date AND e.end_date` for instance, do not rule it out: the equality is hashed and the range is checked afterwards as a filter on each matching pair. MySQL's `EXPLAIN` even prints such conditions as a filter on the hash join line. What a hash join cannot do in most engines is a join with no equality at all, a pure theta join; that one runs as nested loops. MySQL 8.0.20 and later are the exception and hash it anyway, building over a Cartesian product and filtering every pair.
 
-## 6. See the build side in SQLite
-
-SQLite has no hash join, but when the inner table of a join has no index on the join column it builds a temporary B-tree over that column, once, and probes it per outer row. That is the hash join's cost profile with a tree instead of a hash table, and the plan says so.
-
-<TryIt id="4.2" tasks={[
-  { text: 'Run the self-join on <code>product_id</code>, a column with no index. The inner side shows <code>SEARCH p USING AUTOMATIC COVERING INDEX (product_id=?)</code>: SQLite built a lookup structure for the whole statement rather than scanning <code>sales</code> per row.', sql: 'product_id\\s*=', plan: 'AUTOMATIC COVERING INDEX' },
-  { text: 'Create an index on <code>sales (sale_date)</code>, the only independent condition in the statement.', sql: 'create\\s+index' },
-  { text: 'Run the query again. The driving side is now <code>SEARCH s USING INDEX sales_date</code>, and the automatic index is gone: with only 31 driving rows, SQLite judges that building a lookup structure over 20,000 sales no longer pays. A build phase is worth it only when there are many probes.', sql: "sale_date\\s*=\\s*'2024-06-01'", plan: 'SEARCH s USING INDEX sales_date' },
-]} sql={`SELECT s.sale_id, p.sale_id AS other_sale, p.quantity
-  FROM sales s
-  JOIN sales p ON p.product_id = s.product_id
- WHERE s.sale_date = '2024-06-01';`}>
-  <Fragment slot="hints">
-    <details class="hint"><summary>Hint for task 2</summary><div class="d">The join column is not the one to index. The only condition that refers to a single table is <code>s.sale_date = '2024-06-01'</code>.</div></details>
-    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX sales&#95;date ON sales (sale&#95;date);
-SELECT s.sale&#95;id, p.sale&#95;id AS other&#95;sale, p.quantity
-  FROM sales s
-  JOIN sales p ON p.product&#95;id = s.product&#95;id
- WHERE s.sale&#95;date = '2024-06-01';
--- plan: SEARCH s USING INDEX sales&#95;date (sale&#95;date=?)
---       SCAN p</pre></div></details>
-  </Fragment>
-</TryIt>
-
-<Check
-  client:visible
-  question="The optimizer runs the six-month sales report as a hash join. Which change makes it faster?"
-  options={[
-    'An index on sales (subsidiary_id, employee_id), because that is the join condition.',
-    'An index on sales (sale_date), and selecting only the columns the report prints.',
-    'Reversing the join order so that sales is loaded into the hash table.',
-  ]}
-  answer={1}
-  explain="A hash join never searches an index with the join columns; it compares them inside the hash table. The date condition is the only independent predicate, so it is the only one an index can serve, and a shorter select list makes the hash table smaller. The optimizer already hashes the smaller side; swapping the order by hand gains nothing and, for a hash join, does not change the indexing either."
-/>

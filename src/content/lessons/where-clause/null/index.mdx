@@ -3,15 +3,7 @@ title: Indexing NULL
 subtitle: Oracle leaves a row out of an index when every indexed column is NULL. A single-column index therefore cannot answer IS NULL, and a second column that is never NULL fixes it.
 chapter: where-clause
 order: 6.1
-kind: lesson
-minutes: 8
 summary: Why every Oracle index behaves like a partial index, why a one-column index cannot serve WHERE date_of_birth IS NULL, how a concatenated index keeps the row, and how a NOT NULL column or a constant makes IS NULL an index range scan.
-prereqs: "You should have read <a href='/sql/where-clause/partial-and-filtered-indexes/'>Partial Indexes</a> and the <a href='/sql/where-clause/null/'>NULL overview</a>."
-outcomes:
-  - Why every Oracle index is a partial index
-  - Why an INSERT without a value leaves the row out of a single-column index
-  - How a concatenated index keeps the row when one column has a value
-  - How to index NULL with a NOT NULL column or a constant
 recap:
   - Oracle does not add a row to an index if all indexed columns are NULL. Every index behaves as if it had WHERE a IS NOT NULL OR b IS NOT NULL ... attached.
   - A single-column index on a nullable column cannot support an IS NULL query.
@@ -19,7 +11,7 @@ recap:
   - Pair the nullable column with a NOT NULL column or a constant. Every row then has an entry and the NULL keys form an ordinary range. Oracle can index NULL; the myth says otherwise.
 source: https://use-the-index-luke.com/sql/where-clause/null/index
 ---
-import { Callout, KeyIdea, EngineTabs, Check, TryIt } from '@/components/mdx';
+import { Callout, KeyIdea, EngineTabs } from '@/components/mdx';
 
 Oracle does not store an index entry for a row if all of the indexed columns are NULL. In effect, every Oracle index is a [partial index](/sql/where-clause/partial-and-filtered-indexes/) with an implied where clause:
 
@@ -93,7 +85,7 @@ Strictly speaking that makes it a [function-based index](/sql/where-clause/funct
 
 This example also disproves the belief that Oracle cannot index NULL. It can; it just needs one indexed column that has a value. The [myth directory](/sql/myth-directory/null-cannot-be-indexed/) keeps the longer answer.
 
-<Callout kind="warning" title="Common mistake">Picking the second column because it happens to contain no NULLs today. The optimizer decides from what it can prove, not from the data. The extra column must be declared `NOT NULL` or be a constant; the [next lesson](/sql/where-clause/null/not-null-constraint/) shows what happens otherwise.</Callout>
+<Callout kind="warning" title="Common mistake">Picking the second column because it happens to contain no NULLs today. The optimizer decides from what it can prove, not from the data. The extra column must be declared `NOT NULL` or be a constant; the [next page](/sql/where-clause/null/not-null-constraint/) shows what happens otherwise.</Callout>
 
 <EngineTabs>
   <Fragment slot="oracle">
@@ -140,41 +132,3 @@ This example also disproves the belief that Oracle cannot index NULL. It can; it
   </Fragment>
 </EngineTabs>
 
-## 4. Try it
-
-SQLite stores NULL in its indexes, so it shows the contrast. The playground rebuilds `employees` with a nullable `date_of_birth`, clears the birth date of every fiftieth employee, and indexes the column.
-
-<TryIt id="2.6.1" tasks={[
-  { text: 'Run the <code>IS NULL</code> query. SQLite answers it from the single-column index: <code>SEARCH employees USING INDEX emp_dob (date_of_birth=?)</code>. In Oracle this would be a full table scan.', sql: 'date_of_birth\\s+is\\s+null', plan: 'USING INDEX emp_dob \\(date_of_birth=\\?\\)' },
-  { text: 'Add <code>AND subsidiary_id = 20</code>. The plan still uses <code>emp_dob</code>; the subsidiary is filtered on the fetched rows.', sql: 'date_of_birth\\s+is\\s+null\\s+and\\s+subsidiary_id\\s*=\\s*20', plan: 'USING INDEX emp_dob' },
-  { text: 'Create the Oracle-style index <code>emp_dob_x</code> on <code>(date_of_birth, 1)</code>, a constant as the second column, and run the first query again.', sql: 'create\\s+index\\s+emp_dob_x' },
-]} setup={`ALTER TABLE employees RENAME TO employees_old;
-CREATE TABLE employees (employee_id INTEGER NOT NULL, subsidiary_id INTEGER NOT NULL, first_name TEXT NOT NULL, last_name TEXT NOT NULL, date_of_birth TEXT, phone_number TEXT NOT NULL, PRIMARY KEY (employee_id, subsidiary_id));
-INSERT INTO employees SELECT * FROM employees_old;
-DROP TABLE employees_old;
-UPDATE employees SET date_of_birth = NULL WHERE employee_id % 50 = 0;
-CREATE INDEX emp_dob ON employees (date_of_birth);
-ANALYZE;`} sql={`SELECT first_name, last_name
-  FROM employees
- WHERE date_of_birth IS NULL;`}>
-  <Fragment slot="hints">
-    <details class="hint"><summary>Hint for task 1</summary><div class="d">Twenty employees have no birth date. SQLite keeps an entry for each of them under the key NULL, which sorts before every real date.</div></details>
-    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT first&#95;name, last&#95;name FROM employees
- WHERE date&#95;of&#95;birth IS NULL AND subsidiary&#95;id = 20;
--- plan: SEARCH employees USING INDEX emp&#95;dob (date&#95;of&#95;birth=?)
-CREATE INDEX emp&#95;dob&#95;x ON employees (date&#95;of&#95;birth, 1);
-SELECT first&#95;name, last&#95;name FROM employees WHERE date&#95;of&#95;birth IS NULL;</pre></div></details>
-  </Fragment>
-</TryIt>
-
-<Check
-  client:visible
-  question="In Oracle, which index lets WHERE date_of_birth IS NULL run as an index range scan?"
-  options={[
-    'CREATE INDEX emp_dob ON employees (date_of_birth)',
-    "CREATE INDEX emp_dob ON employees (date_of_birth, 'X')",
-    'No index can; Oracle always scans the table for IS NULL',
-  ]}
-  answer={1}
-  explain="Oracle omits an index entry only when every indexed column is NULL. With a constant, or a NOT NULL column, as the second column, each row has an entry, and the NULL values of date_of_birth form one range in the index."
-/>

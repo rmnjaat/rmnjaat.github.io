@@ -268,7 +268,7 @@ Access Table Name = DBUSER.EMPLOYEES  ID = 2,5
 
 <Callout kind="important" title="Sargable is not the same as access">Db2 calls a predicate sargable whenever the data access operator can evaluate it, including a `LIKE '%and'` on an index column. Sargable predicates still read every entry in the range. Only start and stop keys shrink the range. When you want to know whether an index is used well, count the key columns, not the sargable predicates.</Callout>
 
-<Callout kind="warning" title="A filter on an index column is still a filter">An `IXSCAN` on the right index with a `SARG` doing the work reads a range that grows with the table. The amount of work can exceed the number of rows returned by orders of magnitude, and nothing in the operator name warns you. The [data volume lesson](/sql/testing-scalability/data-volume/) shows what that looks like in production.</Callout>
+<Callout kind="warning" title="A filter on an index column is still a filter">An `IXSCAN` on the right index with a `SARG` doing the work reads a range that grows with the table. The amount of work can exceed the number of rows returned by orders of magnitude, and nothing in the operator name warns you. The [data volume page](/sql/testing-scalability/data-volume/) shows what that looks like in production.</Callout>
 
 ## Reading the numbers
 

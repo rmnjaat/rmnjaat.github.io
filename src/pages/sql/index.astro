@@ -1,46 +1,12 @@
 ---
 import Base from '../../layouts/Base.astro';
-import { chapters, referenceSections } from '../../lib/site';
-import { getOrderedLessons, toNavItem, getReferenceBySection, lessonHref } from '../../lib/nav';
-const lessons = (await getOrderedLessons()).map(toNavItem);
-const refs = await getReferenceBySection();
-const byChapter = new Map(chapters.map((c) => [c.slug, [] as typeof lessons]));
-for (const l of lessons) { const key = l.id.split('/')[0]; byChapter.get(key)?.push(l); }
+import Contents from '../../components/ui/Contents.astro';
 ---
-<Base title="Table of Contents" current="course">
-  <div class="wrap toc-list">
-    <p class="crumb"><a href="/">Course</a><span>›</span><span>Table of contents</span></p>
-    <h1 style="font-size: clamp(28px, 4vw, 36px); font-weight: 600; letter-spacing: -.02em; margin: 0 0 var(--s2)">Table of contents</h1>
-    <p class="lede">Nine units, read in order. Each ends with a practice set and a unit check. Reference material at the end works from any lesson.</p>
-    {chapters.map((c) => {
-      const items = byChapter.get(c.slug) ?? [];
-      return (
-        <section>
-          <h2><span class="n">{c.n}</span><a href={items.length === 1 && items[0].id === c.slug ? items[0].href : `/sql/${c.slug}/`} style="color: inherit; text-decoration: none">{c.title}</a></h2>
-          <ol>
-            {(items.length === 1 && items[0].id === c.slug ? items : items.filter((it) => it.id !== c.slug)).map((it) => (
-              <li data-depth={String(it.depth)}>
-                <span class="n">{c.n}.{it.label}</span>
-                <span><a href={it.href}>{it.title}</a><span class="sub">{it.subtitle}</span></span>
-                <span class="min">{it.kind === 'lesson' ? `${it.minutes} min` : it.kind}</span>
-              </li>
-            ))}
-          </ol>
-        </section>
-      );
-    })}
-    {referenceSections.map((s) => {
-      const list = refs.get(s.slug) ?? [];
-      return (
-        <section>
-          <h2><a href={`/sql/${s.slug}/`} style="color: inherit; text-decoration: none">{s.title}</a></h2>
-          <ol>
-            {list.map((r) => (
-              <li data-depth="1"><span class="n"></span><span><a href={lessonHref(r.id)}>{r.data.title}</a><span class="sub">{r.data.subtitle}</span></span><span></span></li>
-            ))}
-          </ol>
-        </section>
-      );
-    })}
+<Base title="Table of Contents" description="Every chapter and page of the site, in reading order, with the appendices." current="contents">
+  <div class="wrap home">
+    <p class="crumb"><a href="/">Home</a><span>›</span><span>Contents</span></p>
+    <h1>Table of contents</h1>
+    <p class="sub">Eight chapters, read in order, and four appendices that work from any page.</p>
+    <Contents />
   </div>
 </Base>

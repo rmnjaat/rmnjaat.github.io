@@ -3,16 +3,7 @@ title: Case-Insensitive Search
 subtitle: An index on last_name cannot answer a question about UPPER(last_name). An index on UPPER(last_name) can, as long as the query spells the expression the same way.
 chapter: where-clause
 order: 2.1
-kind: lesson
-minutes: 11
 summary: Why UPPER(last_name) = ? does a full table scan despite an index on last_name, how the optimizer sees a function as a black box, how to create a function-based index and read its plan in each database, why Oracle needs fresh statistics afterwards, and how SQL Server and older MySQL get there with computed columns.
-prereqs: "You should have read <a href='/sql/where-clause/functions/'>Functions</a> and <a href='/sql/where-clause/the-equals-operator/slow-indexes-part-ii/'>Slow Indexes, Part II</a>, and know how to find the predicate information in a plan."
-outcomes:
-  - Why a condition on UPPER(last_name) cannot use an index on last_name
-  - How the optimizer treats a function, and why the right-hand side is harmless
-  - How to create a function-based index and recognise it in the plan
-  - Why contradictory row estimates point at stale statistics, and what to do about them
-  - How SQL Server and MySQL before 8.0.13 index an expression through a computed or generated column
 recap:
   - A condition on UPPER(last_name) cannot use an index on last_name. To the optimizer the function is a black box, and its input is irrelevant.
   - A function-based index stores the result of the expression. Create it on UPPER(last_name) and the same condition becomes an ordinary index range scan.
@@ -21,7 +12,7 @@ recap:
   - SQL Server, and MySQL before 8.0.13, index a computed or generated column instead. Sometimes the query must name that column; check the plan.
 source: https://use-the-index-luke.com/sql/where-clause/functions/case-insensitive-search
 ---
-import { Callout, KeyIdea, EngineTabs, Check, TryIt } from '@/components/mdx';
+import { Callout, KeyIdea, EngineTabs } from '@/components/mdx';
 
 Ignoring case in a comparison is easy to write. Convert both sides to the same case and compare the results.
 
@@ -152,7 +143,7 @@ The database can use a function-based index when the exact expression from the i
   </Fragment>
 </EngineTabs>
 
-This is a plain `INDEX RANGE SCAN` as unit 1 described it: traverse the tree, follow the leaf chain. There is no special operation and no keyword that marks a function-based index in a plan.
+This is a plain `INDEX RANGE SCAN` as chapter 1 described it: traverse the tree, follow the leaf chain. There is no special operation and no keyword that marks a function-based index in a plan.
 
 <Callout kind="warning" title="Common mistake">Letting the ORM choose the function. Some persistence frameworks add `UPPER` or `LOWER` to a case-insensitive search without telling you; Hibernate, for example, injects an [implicit `LOWER`](/sql/myth-directory/dynamic-sql-is-slow/). Check the generated SQL and index the expression that is actually sent.</Callout>
 
@@ -231,34 +222,3 @@ Both databases can use the index when the indexed expression appears in the stat
 
 <KeyIdea>The expression in the index and the expression in the where clause have to match. Whatever form that takes, computed column or indexed expression, the plan is the only proof that they do.</KeyIdea>
 
-## 6. Try it
-
-SQLite supports indexes on expressions, so the playground can show both halves of the story. It reports an indexed expression as `<expr>` in the plan.
-
-<TryIt id="2.4" tasks={[
-  { text: 'Run the case-insensitive search as it is. The plan says <code>SCAN employees</code>.', sql: 'upper\\s*\\(\\s*last_name\\s*\\)\\s*=', plan: '^SCAN employees' },
-  { text: 'Create an index <code>emp_up_name</code> on <code>UPPER(last_name)</code>.', sql: 'create\\s+index\\s+emp_up_name\\s+on\\s+employees\\s*\\(\\s*upper\\s*\\(\\s*last_name\\s*\\)\\s*\\)' },
-  { text: 'Run the same query again. It now reads <code>SEARCH employees USING INDEX emp_up_name (&lt;expr&gt;=?)</code>.', sql: 'upper\\s*\\(\\s*last_name\\s*\\)\\s*=', plan: 'USING INDEX emp_up_name \\(<expr>=\\?\\)' },
-]} sql={`SELECT first_name, last_name, phone_number
-  FROM employees
- WHERE UPPER(last_name) = UPPER('winand');`}>
-  <Fragment slot="hints">
-    <details class="hint"><summary>Hint for task 3</summary><div class="d">Change <code>UPPER(last_name)</code> to <code>LOWER(last_name)</code> afterwards and run it once more. The index is gone from the plan, because the expression no longer matches.</div></details>
-    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX emp&#95;up&#95;name ON employees (UPPER(last&#95;name));
-SELECT first&#95;name, last&#95;name, phone&#95;number
-  FROM employees WHERE UPPER(last&#95;name) = UPPER('winand');
--- plan: SEARCH employees USING INDEX emp&#95;up&#95;name (&lt;expr&gt;=?)</pre></div></details>
-  </Fragment>
-</TryIt>
-
-<Check
-  client:visible
-  question="There is an index on UPPER(last_name). Which of these queries can use it?"
-  options={[
-    "WHERE LOWER(last_name) = 'winand'",
-    "WHERE last_name = 'Winand'",
-    "WHERE UPPER(last_name) = UPPER(?)",
-  ]}
-  answer={2}
-  explain="A function-based index serves conditions whose left-hand expression matches the indexed expression. Only the third query compares UPPER(last_name). The right-hand side does not matter; UPPER(?) is evaluated once at compile time and behaves like a constant."
-/>

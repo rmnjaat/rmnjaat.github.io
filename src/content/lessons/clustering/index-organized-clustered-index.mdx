@@ -3,16 +3,7 @@ title: Index-Organized Tables and Clustered Indexes
 subtitle: Some engines store the whole table inside the primary key's B-tree. Primary-key access gets cheaper and the heap disappears; every other index gets a second tree to walk.
 chapter: clustering
 order: 3
-kind: lesson
-minutes: 10
 summary: "Heap tables versus index-organized tables (Oracle IOT, SQL Server and InnoDB clustered indexes): what the two promised benefits are, why secondary indexes store the clustering key instead of a rowid and need two tree traversals, the secondary-index-only scan, when each storage model fits, and what each engine offers."
-prereqs: "You should have read <a href='/sql/clustering/index-only-scan-covering-index/'>Index-only scan</a> and know what a rowid is: the physical address of a row in a heap table."
-outcomes:
-  - What a heap table is and why an index entry can point straight at a row in it
-  - What an index-organized table or clustered index is, and the two benefits it promises
-  - Why a secondary index on it cannot store a rowid and what a lookup through it costs instead
-  - When a secondary-index-only scan saves the second traversal
-  - Which tables suit which storage model, and what Db2, MySQL, Oracle, PostgreSQL and SQL Server offer
 recap:
   - A heap table stores rows wherever there is space and never moves them, so every index can point at a row by its rowid and the table access is one read.
   - An index-organized table keeps the rows inside the primary key's B-tree. It saves the heap and makes every primary-key access an index-only scan, but both gains are hard to realize in practice.
@@ -20,7 +11,7 @@ recap:
   - Tables with a single index suit the clustered model. Tables with several indexes are usually better off as heaps with index-only scans where needed. InnoDB and SQL Server cluster by default; Oracle and Db2 use heaps unless told otherwise; PostgreSQL has heaps only.
 source: https://use-the-index-luke.com/sql/clustering/index-organized-clustered-index
 ---
-import { Callout, KeyIdea, Figure, Check, TryIt, EngineTabs } from '@/components/mdx';
+import { Callout, KeyIdea, Figure, EngineTabs } from '@/components/mdx';
 
 An index-only scan runs a statement on the copy of the data that lives in the index; the original rows in the heap table are never needed. Push that to its end and put every column into the index, and the question becomes obvious: why keep the heap table at all?
 
@@ -28,7 +19,7 @@ An index-only scan runs a statement on the copy of the data that lives in the in
 
 The ordinary table is a **heap**. A new row goes into whichever block has free space, and once written it stays there. The row's address, block number plus position inside the block, is its **rowid**, and that is what the leaf entries of every index point to. Because the address never changes, an index entry can point straight at the row and the table access is a single read.
 
-A heap has no order of its own. Two rows with the same `subsidiary_id` are near each other only by coincidence, which is the scattering this whole unit has been fighting.
+A heap has no order of its own. Two rows with the same `subsidiary_id` are near each other only by coincidence, which is the scattering this whole chapter has been fighting.
 
 ## 2. The table inside the index
 
@@ -57,7 +48,7 @@ So a secondary index on an index-organized table stores a logical key instead: t
 
 <Callout kind="important">A secondary index on an index-organized table pays a full tree traversal for every row it fetches, where a heap would pay one block read.</Callout>
 
-The remedy is the one from the previous lesson. If the secondary index holds every column the query needs, the second step is skipped, a **secondary-index-only scan**, and the saving is larger than on a heap because what is skipped is a whole tree traversal rather than a single read.
+The remedy is the one from the previous page. If the secondary index holds every column the query needs, the second step is skipped, a **secondary-index-only scan**, and the saving is larger than on a heap because what is skipped is a whole tree traversal rather than a single read.
 
 The database uses every redundancy it has. The secondary index stores the clustering key in each entry, so a query that selects only the clustering key is answered from the secondary index alone:
 
@@ -103,7 +94,7 @@ Predicate Information (identified by operation id):
    2 - access("SALE_DATE"=:DT)
 ```
 
-<KeyIdea>On a clustered table every secondary index entry carries the clustering key, and every lookup through a secondary index walks two trees. The covering techniques of the previous lesson matter more there, not less.</KeyIdea>
+<KeyIdea>On a clustered table every secondary index entry carries the clustering key, and every lookup through a secondary index walks two trees. The covering techniques of the previous page matter more there, not less.</KeyIdea>
 
 ## 4. Which tables to cluster
 
@@ -111,7 +102,7 @@ The promise shrinks on contact with a second index. Whatever the clustered index
 
 <Callout kind="important" title="One index: cluster. Several: heap.">One index: the clustered model is a good fit. Several indexes: keep the heap, and add covering columns where a query needs clustered-index speed. That buys the fast reads selectively and leaves the remaining indexes cheap.</Callout>
 
-Where the engine gives no choice, the lesson is about the primary key: keep it short, so that the secondary indexes stay small, and prefer increasing values, so that new rows land at the end of the tree instead of splitting leaves in the middle.
+Where the engine gives no choice, the page is about the primary key: keep it short, so that the secondary indexes stay small, and prefer increasing values, so that new rows land at the end of the tree instead of splitting leaves in the middle.
 
 ## 5. What each engine offers
 
@@ -155,35 +146,3 @@ Support is inconsistent, and the same words mean different things.
   </Fragment>
 </EngineTabs>
 
-## 6. See the clustering key in the secondary index
-
-The playground builds `sales_iot` as a `WITHOUT ROWID` copy of `sales`, clustered on `sale_id`, with a secondary index on `sale_date`. SQLite's plan does not show the second traversal, but it does show when the secondary index answers the query by itself.
-
-<TryIt id="5.3" setup={`CREATE TABLE sales_iot (sale_id INTEGER PRIMARY KEY, employee_id INTEGER NOT NULL, subsidiary_id INTEGER NOT NULL, sale_date TEXT NOT NULL, eur_value REAL NOT NULL) WITHOUT ROWID; INSERT INTO sales_iot SELECT sale_id, employee_id, subsidiary_id, sale_date, eur_value FROM sales; CREATE INDEX sales_iot_date ON sales_iot (sale_date);`} tasks={[
-  { text: 'Run the query. It selects only the clustering key, and the plan says <code>USING COVERING INDEX sales_iot_date</code>: the secondary index carries <code>sale_id</code> in every entry.', sql: 'select\\s+sale_id\\s+from\\s+sales_iot', plan: 'COVERING INDEX sales_iot_date' },
-  { text: 'Select <code>eur_value</code> instead. <code>COVERING</code> disappears; each of the 32 entries now costs a traversal of the primary key tree.', sql: 'select\\s+eur_value\\s+from\\s+sales_iot', plan: 'USING INDEX sales_iot_date' },
-  { text: 'Make the secondary index cover the second query: create an index on <code>sales_iot (sale_date, eur_value)</code> and run it again.', sql: 'create\\s+index[\\s\\S]*sale_date\\s*,\\s*eur_value' },
-]} sql={`SELECT sale_id
-  FROM sales_iot
- WHERE sale_date = '2024-05-23';`}>
-  <Fragment slot="hints">
-    <details class="hint"><summary>Hint for task 3</summary><div class="d">A secondary-index-only scan needs every selected column in the secondary index. Put the where column first and the payload column after it.</div></details>
-    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX sales&#95;iot&#95;date&#95;eur ON sales&#95;iot (sale&#95;date, eur&#95;value);
-SELECT eur&#95;value
-  FROM sales&#95;iot
- WHERE sale&#95;date = '2024-05-23';
--- plan: SEARCH sales&#95;iot USING COVERING INDEX sales&#95;iot&#95;date&#95;eur (sale&#95;date=?)</pre></div></details>
-  </Fragment>
-</TryIt>
-
-<Check
-  client:visible
-  question="On an InnoDB table, a query uses a secondary index on sales (sale_date) and returns eur_value. How many B-tree traversals does each row cost?"
-  options={[
-    'One: the secondary index points straight at the row.',
-    'Two: the secondary index yields the primary key, and the primary key tree yields the row.',
-    'None: InnoDB tables are clustered, so every index is covering.',
-  ]}
-  answer={1}
-  explain="InnoDB stores rows in the primary key's B-tree, so a secondary index entry holds the primary key value, not an address. Finding eur_value means walking the secondary tree and then the primary key tree. Only if eur_value were in the secondary index, or if the query selected only sale_id, would the second traversal disappear."
-/>

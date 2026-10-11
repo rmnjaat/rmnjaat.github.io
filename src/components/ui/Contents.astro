@@ -1,0 +1,44 @@
+---
+/** The full table of contents: chapters with their pages, then the appendices. */
+import { chapters, referenceSections } from '../../lib/site';
+import { getOrderedLessons, toNavItem, getReferenceBySection, lessonHref } from '../../lib/nav';
+const pages = (await getOrderedLessons()).map(toNavItem);
+const refs = await getReferenceBySection();
+const byChapter = new Map(chapters.map((c) => [c.slug, [] as typeof pages]));
+for (const l of pages) byChapter.get(l.id.split('/')[0])?.push(l);
+---
+<div class="toc-list">
+  {chapters.map((c) => {
+    const items = byChapter.get(c.slug) ?? [];
+    const single = items.length === 1 && items[0].id === c.slug;
+    return (
+      <section>
+        <h2><span class="n">{c.n === 0 ? '' : c.n}</span><a href={single ? items[0].href : `/sql/${c.slug}/`}>{c.title}</a><span class="tag">{c.tagline}</span></h2>
+        {!single && (
+          <ol>
+            {items.filter((it) => it.id !== c.slug).map((it) => (
+              <li data-depth={String(it.depth)}>
+                <span class="n">{c.n}.{it.label}</span>
+                <span><a href={it.href}>{it.title}</a><span class="sub">{it.subtitle}</span></span>
+              </li>
+            ))}
+          </ol>
+        )}
+      </section>
+    );
+  })}
+  <h2 class="part">Appendices</h2>
+  {referenceSections.map((s) => {
+    const list = refs.get(s.slug) ?? [];
+    return (
+      <section>
+        <h2><span class="n"></span><a href={`/sql/${s.slug}/`}>{s.title}</a><span class="tag">{s.tagline}</span></h2>
+        <ol>
+          {list.filter((r) => r.id !== s.slug).map((r) => (
+            <li data-depth="1"><span class="n"></span><span><a href={lessonHref(r.id)}>{r.data.title}</a><span class="sub">{r.data.subtitle}</span></span></li>
+          ))}
+        </ol>
+      </section>
+    );
+  })}
+</div>

@@ -1,6 +1,6 @@
 ---
 title: SQLite
-subtitle: EXPLAIN QUERY PLAN, the SCAN and SEARCH lines, the column list that shows the access predicate, temp B-trees, automatic indexes, and the playground that runs all of it in your browser.
+subtitle: EXPLAIN QUERY PLAN, the SCAN and SEARCH lines, the column list that shows the access predicate, temp B-trees, automatic indexes, with the sqlite3 shell commands that show them.
 section: explain-plan
 order: 6
 summary: Reading SQLite query plans for indexing work. EXPLAIN QUERY PLAN output, SCAN versus SEARCH, USING INDEX, PRIMARY KEY and COVERING INDEX, the (col=?) notation for access predicates, USE TEMP B-TREE, automatic indexes, compound queries, the .eqp shell setting, and how to get actual row counts.
@@ -50,7 +50,7 @@ QUERY PLAN
 
 The official description of the output format is at sqlite.org/eqp.html.
 
-This site's [playground](/playground/) runs a real SQLite database in the browser, loaded with the example schema, and prints the query plan next to every result. Everything on this page can be tried there.
+Everything on this page can be tried in the `sqlite3` shell with the [example schema](/sql/example-schema/) loaded.
 
 <Callout kind="warning" title="The plan is an estimate">`EXPLAIN QUERY PLAN` prepares the statement and reports the chosen strategy without executing it. It prints no row counts, no timings and no page reads. The choice depends on the statistics in `sqlite_stat1`, so run `ANALYZE` after loading data or creating an index, or the planner is guessing.</Callout>
 
@@ -113,7 +113,7 @@ QUERY PLAN
 
 The index starts with `subsidiary_id`, and nothing in the where clause pins that column, so the index cannot be searched. The condition on `last_name` has vanished from the plan, which is the only way SQLite shows a filter: all 1,000 rows are read and 934 are discarded. That is the plan on a table without statistics, or whenever the leading column has many distinct values.
 
-The playground runs `ANALYZE` when it loads the schema, before any index of yours exists, so the new index has no statistics yet. Run `ANALYZE` again after creating it; its statistics then say that `subsidiary_id` has only three distinct values, and with that knowledge the planner picks a different strategy.
+If `ANALYZE` ran before the index existed, the new index has no statistics yet. Run `ANALYZE` again after creating it; its statistics then say that `subsidiary_id` has only three distinct values, and with that knowledge the planner picks a different strategy.
 
 ```
 QUERY PLAN
@@ -175,4 +175,4 @@ Read it as: 1,000 entries; about 334 per distinct `subsidiary_id`; about 34 per 
 
 For actual counts, the shell offers `.scanstats on` when it was compiled with `SQLITE_ENABLE_STMT_SCANSTATUS`. It then prints, after each statement, the number of loops and rows for every line of the plan, with the estimated rows next to them. Without that option, `.timer on` gives wall-clock time per statement, and the `sqlite3_stmt_status` API exposes counters such as the number of full-scan steps and sorts an application can read after each statement.
 
-In the playground, the practical approach is to compare plans rather than numbers: add the index, rerun the statement, and watch `SCAN` turn into `SEARCH` and the column list in parentheses grow to include every condition in the where clause.
+The practical approach is to compare plans rather than numbers: add the index, rerun the statement, and watch `SCAN` turn into `SEARCH` and the column list in parentheses grow to include every condition in the where clause.

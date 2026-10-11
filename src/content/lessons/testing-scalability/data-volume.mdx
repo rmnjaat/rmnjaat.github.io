@@ -3,16 +3,7 @@ title: Data Volume
 subtitle: A response time is one point on a curve. Two indexes that are both "used" can sit on curves of completely different shape, and only the predicate information tells you which.
 chapter: testing-scalability
 order: 1
-kind: lesson
-minutes: 11
 summary: What scalability means, an experiment with two indexes whose response times diverge twentyfold as data grows, why the execution plans look the same, how predicate information exposes the difference, and how to read index definitions back from a plan.
-prereqs: "You should have read <a href='/sql/anatomy/slow-indexes/'>Slow indexes, part I</a> and know the three steps of an index lookup."
-outcomes:
-  - Why scalability is about how performance responds to a changing environment, not only about adding hardware
-  - How a query that is fast on a small data set can grow twenty times slower while a similar one barely moves
-  - Why two execution plans can look identical and hide that difference
-  - How to find access predicates and filter predicates in the plan of each database
-  - How to reconstruct what is wrong with an index from its predicate information
 recap:
   - A single timing is one data point. Scalability is the curve, and only the curve tells you what production will look like.
   - An access predicate bounds the leaf chain walk. A filter predicate is checked on every entry the walk visits and removes rows from the result, not work from the scan.
@@ -20,7 +11,7 @@ recap:
   - A condition on a column that is not in the leading positions of the index, or that sits behind a column the query does not filter on, becomes a filter predicate.
 source: https://use-the-index-luke.com/sql/testing-scalability/data-volume
 ---
-import { Callout, KeyIdea, Figure, Check, TryIt, EngineTabs, ScaleChart } from '@/components/mdx';
+import { Callout, KeyIdea, Figure, EngineTabs, ScaleChart } from '@/components/mdx';
 
 Everybody accepts that a query gets slower as the table grows. The useful questions are how much slower it gets when the data doubles, and what you can do about that ratio. Those two questions are what database scalability is about, and the answer turns out to depend on something most people never look at in an execution plan.
 
@@ -28,11 +19,11 @@ Everybody accepts that a query gets slower as the table grows. The useful questi
 
 Wikipedia [defines scalability](https://en.wikipedia.org/wiki/Scalability) as "the ability of a system, network, or process to handle a growing amount of work in a capable manner or its ability to be enlarged to accommodate that growth." The definition has two halves, and the second one gets almost all the attention. When people talk about scalability they usually mean more hardware: scaling up to a bigger machine, scaling out to more machines, or whatever the current buzzword for a very large cluster is.
 
-The first half is the one this unit takes seriously. In the broad sense, scalability describes how performance changes when the environment changes, and hardware is only one thing in the environment that can change. The amount of data is another, and so is the number of users hammering the system at the same time. This lesson is about data volume; the [next one](/sql/testing-scalability/system-load/) is about load; the [third](/sql/testing-scalability/response-time-throughput-scaling-horizontal/) comes back to hardware.
+The first half is the one this chapter takes seriously. In the broad sense, scalability describes how performance changes when the environment changes, and hardware is only one thing in the environment that can change. The amount of data is another, and so is the number of users hammering the system at the same time. This page is about data volume; the [next one](/sql/testing-scalability/system-load/) is about load; the [third](/sql/testing-scalability/response-time-throughput-scaling-horizontal/) comes back to hardware.
 
 ## 2. The experiment
 
-Take one query and run it with two different indexes. For the moment the index definitions stay hidden; by the end of the lesson you will be able to work them out from the plans alone.
+Take one query and run it with two different indexes. For the moment the index definitions stay hidden; by the end of the page you will be able to work them out from the plans alone.
 
 ```sql
 SELECT count(*)
@@ -66,7 +57,7 @@ Both lines rise, as expected. What is not expected is the gap. At a hundred time
 
 <Callout kind="tip">The [example schema](/sql/example-schema/) appendix has the scripts to build `scale_data` and repeat this measurement on Oracle, PostgreSQL or SQL Server.</Callout>
 
-Response time depends on many things, and data volume is only one of them. The lesson of the chart is that a query being fast enough under test conditions says nothing about production, particularly when the test database holds a fraction of the production data. The further lesson is that "slower with more data" is not one thing: two queries can be on curves of entirely different shape.
+Response time depends on many things, and data volume is only one of them. The page of the chart is that a query being fast enough under test conditions says nothing about production, particularly when the test database holds a fraction of the production data. The further page is that "slower with more data" is not one thing: two queries can be on curves of entirely different shape.
 
 ## 3. The plans look the same
 
@@ -151,7 +142,7 @@ So why do the two indexes grow at such different rates? The natural move is to c
 
 The two plans in each pair are the same shape and use the same operations; the only visible difference is the index name. The cost columns do reflect that one is cheaper, but a number is not an explanation. Nothing in these plans says why.
 
-This looks like the slow index experience from [unit 1](/sql/anatomy/slow-indexes/): the query uses an index and is slow anyway. You no longer believe in [broken indexes](/sql/myth-directory/indexes-can-degenerate/), so you go back to the two ingredients that make an index lookup slow: fetching rows from the table, and scanning a wide range of the index. Neither plan contains a `TABLE ACCESS BY INDEX ROWID` or its equivalent, so the table is not the problem. That leaves the range. One of these scans must be walking a much wider stretch of the index than the other. And the width of the scanned range is shown in one specific place in the plan: the predicate information.
+This looks like the slow index experience from [chapter 1](/sql/anatomy/slow-indexes/): the query uses an index and is slow anyway. You no longer believe in [broken indexes](/sql/myth-directory/indexes-can-degenerate/), so you go back to the two ingredients that make an index lookup slow: fetching rows from the table, and scanning a wide range of the index. Neither plan contains a `TABLE ACCESS BY INDEX ROWID` or its equivalent, so the table is not the problem. That leaves the range. One of these scans must be walking a much wider stretch of the index than the other. And the width of the scanned range is shown in one specific place in the plan: the predicate information.
 
 ## 4. The predicate information
 
@@ -293,43 +284,7 @@ CREATE INDEX scale_fast ON scale_data (section, id2, id1)
 
 `id1` is there only so that both indexes have the same size and the same number of columns. Without it, you might suspect the smaller index wins because it is smaller. It does not; it wins because of column order.
 
-<Callout kind="warning" title="Common mistake">"The index has all three columns, so the query can use all three conditions." Column order is not a detail. A condition can only be an access predicate if every column before it in the index also has an equality condition in the query. Unit 2's lesson on [concatenated indexes](/sql/where-clause/the-equals-operator/concatenated-keys/) goes through this in full.</Callout>
+<Callout kind="warning" title="Common mistake">"The index has all three columns, so the query can use all three conditions." Column order is not a detail. A condition can only be an access predicate if every column before it in the index also has an equality condition in the query. Chapter 2's page on [concatenated indexes](/sql/where-clause/the-equals-operator/concatenated-keys/) goes through this in full.</Callout>
 
-## 6. Try it yourself
+<Callout kind="note" title="Further reading">The [greater, less and between](/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates/) page explains how range conditions turn into filter predicates, and [indexing LIKE filters](/sql/where-clause/searching-for-ranges/like-performance-tuning/) shows access and filter predicates arising from one expression. The execution plan reference shows where to find filter predicates in [Oracle](/sql/explain-plan/oracle/), [PostgreSQL](/sql/explain-plan/postgresql/) and [SQL Server](/sql/explain-plan/sql-server/). For the mathematical view of scalability, see [Big O notation](https://en.wikipedia.org/wiki/Big_O_notation).</Callout>
 
-The same experiment fits the example schema. The playground creates a three-column index on `employees` before you start, with `date_of_birth` in the middle so that it plays the part of `id1`. The query filters on the first and third columns.
-
-<TryIt id="3.1" tasks={[
-  { text: 'Run the query. The plan reads <code>SEARCH employees USING COVERING INDEX emp_slow (subsidiary_id=?)</code>. Only <code>subsidiary_id</code> is in the parentheses: <code>last_name</code> is a filter predicate, checked on each of the 500 entries for the subsidiary.', sql: 'last_name\\s*=', plan: '\\(subsidiary_id=\\?\\)' },
-  { text: 'Create a second index <code>emp_fast</code> on <code>(subsidiary_id, last_name, date_of_birth)</code>.', sql: 'create\\s+index\\s+emp_fast' },
-  { text: 'Run the query again. SQLite now prefers <code>emp_fast</code>, and both columns appear in the parentheses as access predicates. The result is the same 33 rows, found without visiting the other 467.', sql: 'last_name\\s*=', plan: 'emp_fast \\(subsidiary_id=\\? AND last_name=\\?\\)' },
-]} setup={`CREATE INDEX emp_slow ON employees (subsidiary_id, date_of_birth, last_name);`} sql={`SELECT COUNT(*)
-  FROM employees
- WHERE subsidiary_id = 20
-   AND last_name = 'Winand';`}>
-  <Fragment slot="hints">
-    <details class="hint"><summary>Hint for task 1</summary><div class="d">SQLite lists only the access predicates in the parentheses after the index name. A condition that is missing there, although its column is in the index, is being applied as a filter.</div></details>
-    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX emp&#95;fast ON employees (subsidiary&#95;id, last&#95;name, date&#95;of&#95;birth);
-SELECT COUNT(&#42;)
-  FROM employees
- WHERE subsidiary&#95;id = 20
-   AND last&#95;name = 'Winand';
--- plan: SEARCH employees USING COVERING INDEX emp&#95;fast (subsidiary&#95;id=? AND last&#95;name=?)</pre></div></details>
-  </Fragment>
-</TryIt>
-
-Both versions return in a fraction of a millisecond here, with a thousand rows. That is the whole point of this lesson: at this volume the timing cannot tell them apart, and only the plan can.
-
-<Callout kind="note" title="Further reading">The [greater, less and between](/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates/) lesson explains how range conditions turn into filter predicates, and [indexing LIKE filters](/sql/where-clause/searching-for-ranges/like-performance-tuning/) shows access and filter predicates arising from one expression. The execution plan reference shows where to find filter predicates in [Oracle](/sql/explain-plan/oracle/), [PostgreSQL](/sql/explain-plan/postgresql/) and [SQL Server](/sql/explain-plan/sql-server/). For the mathematical view of scalability, see [Big O notation](https://en.wikipedia.org/wiki/Big_O_notation).</Callout>
-
-<Check
-  client:visible
-  question="Two plans both show an INDEX RANGE SCAN on the same table, with the same row estimate. One is twenty times slower at volume. Where in the plan is the explanation?"
-  options={[
-    'In the index name: one index is bigger than the other.',
-    'In the predicate information: the slow plan applies one of the conditions as a filter predicate instead of an access predicate, so the scan reads a far wider range.',
-    'Nowhere. Plans cannot show this; only a benchmark can.',
-  ]}
-  answer={1}
-  explain="The operation name and the row estimate are the same for both. Only the predicate section shows that the slow index can use one condition to bound the scan and must check the other on every entry it passes. Size is not the cause; the test indexes were deliberately the same size."
-/>

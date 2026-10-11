@@ -3,16 +3,7 @@ title: Insert
 subtitle: An insert has no where clause, so no index can help it. Every index on the table makes it slower, and the first one makes the biggest difference.
 chapter: dml
 order: 1
-kind: lesson
-minutes: 9
 summary: Why the number of indexes is the dominant factor for insert performance, what the database does to the heap and to each B-tree for a new row, how a leaf split can climb to the root, what the measured curve looks like from zero to five indexes, and when dropping indexes for a bulk load pays off.
-prereqs: "You should know how a <a href='/sql/anatomy/the-tree/'>B-tree</a> is traversed and how its <a href='/sql/anatomy/the-leaf-nodes/'>leaf nodes</a> are chained."
-outcomes:
-  - Why INSERT is the one statement that cannot benefit from an index directly
-  - What a heap insert costs compared with an index insert
-  - How a full leaf node splits, and when a split makes the tree deeper
-  - How insert time grows from zero to five indexes, and why the first index matters most
-  - When to drop indexes for a bulk load and when not to
 recap:
   - Indexes are redundant copies of table data, and every write has to keep them consistent. For INSERT that is pure cost, because there is no where clause for an index to speed up.
   - Writing the row into a heap table is quick and mostly in memory. Writing the index entry means a tree traversal, an ordered insert into a specific leaf, and possibly a split.
@@ -21,9 +12,9 @@ recap:
   - For large loads it can pay to drop the indexes first and rebuild them afterwards, if nothing else needs them in the meantime.
 source: https://use-the-index-luke.com/sql/dml/insert
 ---
-import { Callout, KeyIdea, Figure, Check, TryIt, Insert } from '@/components/mdx';
+import { Callout, KeyIdea, Figure, Insert } from '@/components/mdx';
 
-Everything up to here has been about queries, but SQL also changes data. `INSERT`, `DELETE` and `UPDATE` form the data manipulation language, DML, and indexes mostly make them slower. The reason is simple. An index is pure redundancy: it holds nothing that is not also in the table. Whenever the table changes, the database has to keep every copy consistent, so each write touches the table and every index that holds a copy of the affected data. This unit measures what that costs, starting with the statement that gets nothing in return.
+Everything up to here has been about queries, but SQL also changes data. `INSERT`, `DELETE` and `UPDATE` form the data manipulation language, DML, and indexes mostly make them slower. The reason is simple. An index is pure redundancy: it holds nothing that is not also in the table. Whenever the table changes, the database has to keep every copy consistent, so each write touches the table and every index that holds a copy of the affected data. This chapter measures what that costs, starting with the statement that gets nothing in return.
 
 ## 1. Nothing to gain, everything to maintain
 
@@ -63,7 +54,7 @@ The original measurement inserted rows into the same table with zero to five ind
 
 <Callout kind="note">Going from zero to one index is the big step. After that each index adds its share, so a table that is written often should carry as few as it can.</Callout>
 
-<Callout kind="tip">Add an index only for a query that needs it, and drop the ones another index already covers. The same discipline pays off for `DELETE` and `UPDATE`, which the next two lessons cover.</Callout>
+<Callout kind="tip">Add an index only for a query that needs it, and drop the ones another index already covers. The same discipline pays off for `DELETE` and `UPDATE`, which the next two pages cover.</Callout>
 
 <Callout kind="warning" title="Common mistake">Adding an index "just in case" and never checking whether a query uses it. Every such index is paid for on every insert and earns nothing back. Each database can report index usage; look before adding, and look again a few months later.</Callout>
 
@@ -75,36 +66,3 @@ Still, the no-index speed is so much better that it can be worth dropping all in
 
 <KeyIdea title="Think about it">Two questions to sit with. On an [index-organized table or clustered index](/sql/clustering/index-organized-clustered-index/) the table is itself a B-tree: where would the zero-index bar of Figure 8.2 go? And can you construct a situation where an `INSERT` runs faster *because* of an index, through some roundabout route?</KeyIdea>
 
-## 5. Try it yourself
-
-The playground inserts 20,000 rows into `sales` with one statement. The table starts with only its primary key. The status line shows the time; browser timings jump around, so run each step a few times.
-
-<TryIt id="8.1" tasks={[
-  { text: 'Run the insert as given and note the time with only the primary key in place.', sql: 'i\\s*<\\s*20000[\\s\\S]*insert\\s+into\\s+sales' },
-  { text: 'Create three indexes: on <code>sale_date</code>, on <code>(subsidiary_id, employee_id)</code> and on <code>(product_id, sale_date)</code>.', sql: 'create\\s+index[\\s\\S]*create\\s+index[\\s\\S]*create\\s+index' },
-  { text: 'Run the insert again, this time for 50,000 rows (change <code>20000</code> to <code>50000</code>). Compare the time per row with the first run.', sql: 'i\\s*<\\s*50000[\\s\\S]*insert\\s+into\\s+sales' },
-]} sql={`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000)
-INSERT INTO sales (employee_id, subsidiary_id, sale_date, eur_value, product_id, quantity)
-SELECT ((i * 7919) % 1000) + 1, 20,
-       date('2025-10-02', '+' || (i % 90) || ' days'),
-       (i % 900) + 9.9, (i % 300) + 1, (i % 5) + 1
-  FROM n;`}>
-  <Fragment slot="hints">
-    <details class="hint"><summary>Hint for task 2</summary><div class="d">Three CREATE INDEX statements separated by semicolons can go in one run.</div></details>
-    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX sales&#95;date ON sales (sale&#95;date);
-CREATE INDEX sales&#95;emp ON sales (subsidiary&#95;id, employee&#95;id);
-CREATE INDEX sales&#95;prod ON sales (product&#95;id, sale&#95;date);</pre></div></details>
-  </Fragment>
-</TryIt>
-
-<Check
-  client:visible
-  question="A table has a primary key and four other indexes. A query uses only the primary key and one of the other indexes. What does an INSERT into that table pay for?"
-  options={[
-    'The primary key and the one index that queries use. Unused indexes are skipped.',
-    'All five indexes. Every index entry must be added whether or not any query reads that index.',
-    'Only the primary key. Secondary indexes are updated lazily by a background process.',
-  ]}
-  answer={1}
-  explain="An index is a redundant copy that has to be complete at all times, or the next query using it would miss rows. The database adds the entry to every index inside the insert statement, and it has no way of knowing which indexes future queries will use."
-/>

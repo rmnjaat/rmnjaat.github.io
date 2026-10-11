@@ -11,101 +11,50 @@ interface Props {
   description: string;
   crumbs: Link[];
   chapterSlug?: string;
-  kind?: 'lesson' | 'practice' | 'quiz' | 'reference' | 'index';
-  minutes?: number;
-  prereqs?: string;
-  outcomes?: string[];
+  kind?: 'page' | 'reference' | 'index';
   recap?: string[];
   headings?: MarkdownHeading[];
   prev?: Link;
   next?: Link;
   source?: string;
-  current?: 'course' | 'plans' | 'glossary' | 'practice';
-  trackable?: boolean;
-  unitItems?: { id: string }[];
+  current?: 'contents' | 'plans' | 'myths' | 'schema' | 'about';
 }
-const { id, title, subtitle, description, crumbs, chapterSlug, kind = 'lesson', minutes, prereqs, outcomes = [], recap = [], headings = [], prev, next, source, current = 'course', trackable = true, unitItems = [] } = Astro.props;
+const { id, title, subtitle, description, crumbs, chapterSlug, kind = 'page', recap = [], headings = [], prev, next, source, current = 'contents' } = Astro.props;
 const h2s = headings.filter((h) => h.depth === 2);
-const kindLabel = kind === 'practice' ? 'Practice set' : kind === 'quiz' ? 'Unit check' : kind === 'reference' ? 'Reference' : 'Lesson';
 ---
 <Base title={title} description={description} current={current}>
   <div class="lesson-shell">
     <ChapterNav currentId={id} currentChapter={chapterSlug} />
-    <main class="article" data-pagefind-body data-lesson-id={id} data-lesson-title={title} data-unit-items={JSON.stringify(unitItems.map((u) => u.id))}>
+    <main class="article" data-pagefind-body>
       <p class="crumb" data-pagefind-ignore>{crumbs.map((c, i) => <>{i > 0 && <span>›</span>}<a href={c.href}>{c.title}</a></>)}</p>
       <h1>{title}</h1>
-      {(minutes || kind !== 'index') && (
-        <p class="meta" data-pagefind-ignore>
-          {minutes ? <span>{minutes} min</span> : null}
-          <span>{kindLabel}</span>
-          <slot name="meta" />
-        </p>
-      )}
-      {(prereqs || outcomes.length > 0) && (
-        <div class="before">
-          {prereqs && <><div>Before you start</div><div set:html={prereqs} /></>}
-          {outcomes.length > 0 && <><div>You will learn</div><div><ul>{outcomes.map((o) => <li>{o}</li>)}</ul></div></>}
-        </div>
-      )}
-      {!prereqs && outcomes.length === 0 && subtitle && kind !== 'quiz' && kind !== 'practice' && <p class="lede">{subtitle}</p>}
+      {subtitle && <p class="lede">{subtitle}</p>}
       <div class="prose">
         <slot />
       </div>
       {recap.length > 0 && (
         <section class="summary" aria-labelledby="recap-h" data-pagefind-ignore>
-          <h2 id="recap-h">Summary</h2>
+          <h2 id="recap-h">In short</h2>
           <ul>{recap.map((r) => <li>{r}</li>)}</ul>
         </section>
       )}
-      {trackable && (
-        <div class="done-row" data-pagefind-ignore>
-          <svg class="ring" id="ring" viewBox="0 0 54 54" aria-hidden="true"><circle class="bg" cx="27" cy="27" r="22"/><circle class="fg" cx="27" cy="27" r="22"/><text x="27" y="31" text-anchor="middle" id="ringtxt">0/0</text></svg>
-          <button class="btn primary" type="button" id="mark-done" data-id={id}>Mark complete</button>
-          <div><div class="t" id="done-title">{next ? `Next: ${next.title}` : 'End of this unit'}</div><div class="s" id="done-hint">Progress is stored in this browser only.</div></div>
-        </div>
-      )}
-      {source && <p class="source-note" data-pagefind-ignore>This page rewrites and extends <a href={source} rel="noopener">the corresponding page</a> of Markus Winand's <em>Use The Index, Luke</em>. Read the original for the author's own wording.</p>}
+      {source && <p class="source-note" data-pagefind-ignore>This page rewrites <a href={source} rel="noopener">the corresponding page</a> of Markus Winand's <em>Use The Index, Luke</em>. Read the original for the author's own wording.</p>}
       {(prev || next) && (
-        <nav class="pager" aria-label="Lesson navigation" data-pagefind-ignore>
+        <nav class="pager" aria-label="Page navigation" data-pagefind-ignore>
           {prev ? <a href={prev.href} class="prev"><small>Previous</small><b>{prev.title}</b></a> : <span></span>}
-          {next && <a href={next.href} class="next"><small>Next up</small><b>{next.title}</b></a>}
+          {next && <a href={next.href} class="next"><small>Next</small><b>{next.title}</b></a>}
         </nav>
       )}
     </main>
     {h2s.length > 1 && (
       <aside class="on-page" aria-label="On this page">
-        <h2>In this {kind === 'reference' ? 'page' : 'lesson'}</h2>
+        <h2>On this page</h2>
         <ol>{h2s.map((h) => <li><a href={`#${h.slug}`} data-target={h.slug}>{h.text}</a></li>)}</ol>
-        {minutes && <div class="est">About {minutes} minutes. Progress saves in this browser.</div>}
       </aside>
     )}
   </div>
 </Base>
 <script>
-  import { getDone, markDone, setLast } from '../lib/prefs';
-  const main = document.querySelector<HTMLElement>('main[data-lesson-id]');
-  if (main && main.dataset.lessonId) setLast({ id: main.dataset.lessonId, title: main.dataset.lessonTitle ?? '', href: location.pathname });
-  const btn = document.getElementById('mark-done') as HTMLButtonElement | null;
-  const hint = document.getElementById('done-hint');
-  const unitItems: string[] = JSON.parse(main?.dataset.unitItems || '[]');
-  const paint = () => {
-    const done = getDone();
-    if (btn) {
-      const d = done.has(btn.dataset.id!);
-      btn.textContent = d ? '✓ Completed' : 'Mark complete';
-      btn.classList.toggle('primary', !d);
-      if (hint) hint.textContent = d ? 'Click again to unmark.' : 'Progress is stored in this browser only.';
-    }
-    const ring = document.getElementById('ring');
-    if (ring && unitItems.length) {
-      const n = unitItems.filter((i) => done.has(i)).length;
-      (ring.querySelector('.fg') as SVGElement).style.strokeDashoffset = String(138 - (138 * n) / unitItems.length);
-      const t = document.getElementById('ringtxt'); if (t) t.textContent = `${n}/${unitItems.length}`;
-    }
-  };
-  btn?.addEventListener('click', () => { markDone(btn.dataset.id!, !getDone().has(btn.dataset.id!)); paint(); });
-  paint(); window.addEventListener('util:done', paint);
-
   const links = [...document.querySelectorAll<HTMLAnchorElement>('.on-page a[data-target]')];
   if (links.length && 'IntersectionObserver' in window) {
     const map = new Map(links.map((a) => [a.dataset.target!, a]));

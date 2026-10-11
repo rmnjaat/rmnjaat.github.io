@@ -3,14 +3,7 @@ title: Functions
 subtitle: Wrap an indexed column in a function and the index is invisible to the query. The fix is to index the result of the function instead.
 chapter: where-clause
 order: 2
-kind: lesson
-minutes: 3
-summary: Why an index on last_name still forces the search term to match the stored case, what a function-based index is, what each database supports, and what the three lessons on case-insensitive search, user-defined functions and over-indexing cover.
-prereqs: "You should have read <a href='/sql/where-clause/the-equals-operator/slow-indexes-part-ii/'>Slow Indexes, Part II</a>, which ends with an index on last_name."
-outcomes:
-  - Why an index on a column does not help a condition on a function of that column
-  - What a function-based index stores instead
-  - Which databases support function-based indexes directly and which need a generated column
+summary: Why an index on last_name still forces the search term to match the stored case, what a function-based index is, what each database supports, and what the three pages on case-insensitive search, user-defined functions and over-indexing cover.
 recap:
   - An index stores column values. A condition on a function of the column compares something the index does not contain.
   - A function-based index stores the result of the expression, and a query using the same expression can use it.
@@ -18,9 +11,9 @@ recap:
   - Only deterministic functions can be indexed, and every extra index has a cost.
 source: https://use-the-index-luke.com/sql/where-clause/functions
 ---
-import { EngineTabs, KeyIdea, Check } from '@/components/mdx';
+import { EngineTabs, KeyIdea } from '@/components/mdx';
 
-The index on `last_name` from the previous lesson made the directory query fast. It also left a restriction in place: the search term has to be spelled with the same capitalisation as the stored name, or the lookup finds nothing. This group of lessons removes that restriction without giving the speed back.
+The index on `last_name` from the previous page made the directory query fast. It also left a restriction in place: the search term has to be spelled with the same capitalisation as the stored name, or the lookup finds nothing. This group of pages removes that restriction without giving the speed back.
 
 ## 1. The index sees a different column
 
@@ -54,22 +47,11 @@ Every database has an answer, though the answers differ in shape. Some index the
   </Fragment>
 </EngineTabs>
 
-Three lessons cover it.
+Three pages cover it.
 
-[Case-Insensitive Search](/sql/where-clause/functions/case-insensitive-search/) is the classic example. An `UPPER(last_name)` search goes from a full table scan to an index lookup, and the lesson shows the index definition and the plan in each database.
+[Case-Insensitive Search](/sql/where-clause/functions/case-insensitive-search/) is the classic example. An `UPPER(last_name)` search goes from a full table scan to an index lookup, and the page shows the index definition and the plan in each database.
 
 [User-Defined Functions](/sql/where-clause/functions/user-defined-functions/) explains why an indexed function has to be deterministic, why that rules out anything involving the current date, and how to still use an index for an age condition.
 
 [Over-Indexing](/sql/where-clause/functions/over-indexing/) is the caution. Each function-based index is one more B-tree to maintain, and it is easy to end up with two indexes doing the job of one.
 
-<Check
-  client:visible
-  question="There is an index on last_name. The query filters on UPPER(last_name) = 'WINAND'. Why is the index not used?"
-  options={[
-    'Because UPPER is slow, so the optimizer prefers to avoid it.',
-    'Because the index holds the stored names, and the condition is on a value the index does not contain.',
-    'Because string indexes only work with LIKE.',
-  ]}
-  answer={1}
-  explain="The index entries are the original last_name values in their original order. The condition compares UPPER(last_name), a value the index never stored and whose order the database cannot infer. A function-based index on UPPER(last_name) stores exactly that value and makes the lookup possible."
-/>

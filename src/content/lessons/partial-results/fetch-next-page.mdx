@@ -3,16 +3,7 @@ title: Fetching the Next Page
 subtitle: Offset paging counts rows from the start and throws them away, so every page costs more than the one before. Seek paging remembers where the last page ended and goes straight there.
 chapter: partial-results
 order: 2
-kind: lesson
-minutes: 14
 summary: The offset method and its syntax per engine, why it drifts and slows down, the seek method with a boundary from the previous page, why paging needs a deterministic sort order, row value comparisons and which engines can use them as access predicates, the approximation for the others, and what the seek method cannot do.
-prereqs: "You should have read <a href='/sql/partial-results/top-n-queries/'>Selecting Top-N Rows</a>, because the seek method is a top-N query with a starting point."
-outcomes:
-  - How OFFSET is written in each engine and why the database still has to count every skipped row
-  - Why offset pages drift when rows are inserted and get slower further back
-  - How the seek method turns the last row of the previous page into an index access predicate
-  - Why paging needs a deterministic ORDER BY and how a unique column provides it
-  - How row value comparisons express "comes after" and how to approximate them where they are not supported
 recap:
   - The offset method numbers the rows from the start and discards the ones before the page. Any page is reachable by number, but the database counts through every skipped row, pages drift on insert, and later pages are slower.
   - The seek method uses the values of the last row shown as a boundary in the where clause. The index lands on the page directly, every page costs the same, and inserts cannot shift it.
@@ -21,9 +12,9 @@ recap:
   - Where row values do not work, use sale_date <= ? as the access predicate and remove the already-shown rows with a filter. The seek method cannot jump to an arbitrary page, and browsing backwards flips every comparison and sort direction.
 source: https://use-the-index-luke.com/sql/partial-results/fetch-next-page
 ---
-import { Callout, KeyIdea, Figure, EngineTabs, Check, TryIt, Pagination } from '@/components/mdx';
+import { Callout, KeyIdea, Figure, EngineTabs, Pagination } from '@/components/mdx';
 
-The [previous lesson](/sql/partial-results/top-n-queries/) fetched the first page with a pipelined top-N query. Then the user clicks "next", and a second query has to deliver the rows after the ones already shown. The hard part is skipping them. Two approaches exist. With the **offset method** the database counts rows from the start of the result and discards the ones before the page. With the **seek method** the query names the last row the user saw and asks for what sorts after it.
+The [previous page](/sql/partial-results/top-n-queries/) fetched the first page with a pipelined top-N query. Then the user clicks "next", and a second query has to deliver the rows after the ones already shown. The hard part is skipping them. Two approaches exist. With the **offset method** the database counts rows from the start of the result and discards the ones before the page. With the **seek method** the query names the last row the user saw and asks for what sorts after it.
 
 ## 1. The offset method
 
@@ -31,7 +22,7 @@ Offset paging is the version in every tutorial, and most engines have a keyword 
 
 <EngineTabs>
   <Fragment slot="db2">
-  Db2 supports `OFFSET` since release 11.1. On earlier releases the standard-conforming alternative is the `ROW_NUMBER()` window function from the [next lesson](/sql/partial-results/window-functions/). Two further routes exist and neither is recommended: `DB2_COMPATIBILITY_VECTOR=MYS` enables MySQL-style `LIMIT` and `OFFSET`, but then `FETCH FIRST` cannot be combined with `OFFSET`; `DB2_COMPATIBILITY_VECTOR=ORA` enables Oracle's `ROWNUM` pseudo column.
+  Db2 supports `OFFSET` since release 11.1. On earlier releases the standard-conforming alternative is the `ROW_NUMBER()` window function from the [next page](/sql/partial-results/window-functions/). Two further routes exist and neither is recommended: `DB2_COMPATIBILITY_VECTOR=MYS` enables MySQL-style `LIMIT` and `OFFSET`, but then `FETCH FIRST` cannot be combined with `OFFSET`; `DB2_COMPATIBILITY_VECTOR=ORA` enables Oracle's `ROWNUM` pseudo column.
   </Fragment>
   <Fragment slot="mysql">
   MySQL and PostgreSQL append `OFFSET` to the `LIMIT` clause. The offset discards rows from the start of the top-N result, and the limit is applied after it.
@@ -260,44 +251,3 @@ The seek method is harder to handle, and that is its main drawback. The where cl
 
 <Callout kind="warning" title="Common mistake">Seeking on the sort column alone. If the sort column is not unique, the boundary skips or repeats rows at the page break. Add a unique column to both the `ORDER BY` and the comparison, and put it in the index.</Callout>
 
-## 6. Try it yourself
-
-The playground has `sales_date_id` on `(sale_date, sale_id)`. The first statement is page 502 by offset: the plan is `SCAN sales USING INDEX sales_date_id` with no search condition, because the database walks the index from the end and counts.
-
-<TryIt id="7.2" setup={`CREATE INDEX sales_date_id ON sales (sale_date, sale_id);`} tasks={[
-  { text: 'Run the offset query. The plan is a plain <code>SCAN sales USING INDEX</code>: the index is walked from the end and 5,010 rows are counted and discarded.', sql: 'offset\\s+5010', plan: '^SCAN sales USING INDEX sales_date_id' },
-  { text: "Replace the OFFSET with the seek condition <code>WHERE (sale_date, sale_id) &lt; ('2025-04-24', 11887)</code> and <code>LIMIT 10</code>. The plan becomes <code>SEARCH ... (sale_date&lt;?)</code>: a tree traversal to the boundary, then ten entries.", sql: '\\(\\s*sale_date\\s*,\\s*sale_id\\s*\\)\\s*<', plan: 'SEARCH sales USING INDEX sales_date_id \\(sale_date<\\?\\)' },
-  { text: "Write the same page with the approximation: <code>WHERE sale_date &lt;= '2025-04-24' AND NOT (sale_date = '2025-04-24' AND sale_id &gt;= 11887)</code>. Same plan, same ten rows.", sql: 'sale_date\\s*<=[\\s\\S]*not\\s*\\(', plan: 'SEARCH sales USING INDEX sales_date_id' },
-]} sql={`SELECT sale_id, sale_date, eur_value
-  FROM sales
- ORDER BY sale_date DESC, sale_id DESC
- LIMIT 10 OFFSET 5010;`}>
-  <Fragment slot="hints">
-    <details class="hint"><summary>Hint for task 2</summary><div class="d">The boundary is the last row of page 501: sale 11887 on 2025-04-24. Keep the ORDER BY on both columns, descending.</div></details>
-    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT sale&#95;id, sale&#95;date, eur&#95;value
-  FROM sales
- WHERE (sale&#95;date, sale&#95;id) &lt; ('2025-04-24', 11887)
- ORDER BY sale&#95;date DESC, sale&#95;id DESC
- LIMIT 10;
--- plan: SEARCH sales USING INDEX sales&#95;date&#95;id (sale&#95;date&lt;?)
-SELECT sale&#95;id, sale&#95;date, eur&#95;value
-  FROM sales
- WHERE sale&#95;date &lt;= '2025-04-24'
-   AND NOT (sale&#95;date = '2025-04-24' AND sale&#95;id &gt;= 11887)
- ORDER BY sale&#95;date DESC, sale&#95;id DESC
- LIMIT 10;
--- plan: SEARCH sales USING INDEX sales&#95;date&#95;id (sale&#95;date&lt;?)</pre></div></details>
-  </Fragment>
-</TryIt>
-
-<Check
-  client:visible
-  question="Why does the seek method need sale_id in both the ORDER BY and the where clause, when the page is sorted by sale_date?"
-  options={[
-    'It makes the index smaller, because sale_id is the primary key.',
-    'Several sales share a date, so sale_date alone does not say which rows come after the last one shown. The unique column makes the order deterministic and the boundary unambiguous.',
-    'The database requires a primary key column in every row value comparison.',
-  ]}
-  answer={1}
-  explain="A boundary only works if every row is strictly before or strictly after it. With ties on sale_date, rows of the boundary date would be skipped or repeated. Adding a unique column to the ORDER BY and to the comparison, and to the index, makes the sequence deterministic and keeps the comparison an access predicate."
-/>

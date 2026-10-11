@@ -3,21 +3,14 @@ title: Searching for Ranges
 subtitle: Equality is the easy case. Less than, greater than, BETWEEN and even LIKE use the index too, but they put a limit on how the columns of a concatenated index can be ordered.
 chapter: where-clause
 order: 4
-kind: lesson
-minutes: 2
-summary: Why range operators and some LIKE patterns use a B-tree index like equality does, why they constrain the column order of a multi-column index, and what the three lessons of this group cover.
-prereqs: "You should know what an <a href='/sql/anatomy/slow-indexes/'>index range scan</a> is and how a <a href='/sql/where-clause/the-equals-operator/concatenated-keys/'>concatenated index</a> is sorted."
-outcomes:
-  - Which operators besides equals can use a B-tree index
-  - Why a range condition constrains the column order of a concatenated index
-  - Why some queries have no perfect column order at all
+summary: Why range operators and some LIKE patterns use a B-tree index like equality does, why they constrain the column order of a multi-column index, and what the three pages of this group cover.
 recap:
   - Inequality operators and BETWEEN use the index the same way equality does; under the right conditions LIKE does too.
   - These operators restrict the usable column orders of a multi-column index.
-  - For some queries no column order is ideal, and the next three lessons show what to do then.
+  - For some queries no column order is ideal, and the next three pages show what to do then.
 source: https://use-the-index-luke.com/sql/where-clause/searching-for-ranges
 ---
-import { KeyIdea, Check } from '@/components/mdx';
+import { KeyIdea } from '@/components/mdx';
 
 Every example so far compared a column with one value. Real where clauses ask for the sales of last month, the employees born in the seventies, the names that start with "Win". A B-tree answers those as well, because its leaf nodes are sorted: the tree traversal finds the first entry inside the range, and the leaf chain delivers the rest.
 
@@ -33,7 +26,7 @@ That is why range operators limit the choice of column order in a multi-column i
 
 <KeyIdea>Range operators use the index as readily as equality does, and they decide the column order of a concatenated index.</KeyIdea>
 
-## 3. The three lessons
+## 3. The three pages
 
 [Greater, Less and BETWEEN](/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates/) revisits column order with a range in the picture and introduces access and filter predicates.
 
@@ -41,14 +34,3 @@ That is why range operators limit the choice of column order in a multi-column i
 
 [Index Merge](/sql/where-clause/searching-for-ranges/index-merge-performance/) answers the question of why one index per column is usually not the right answer.
 
-<Check
-  client:visible
-  question="Which of these conditions can a B-tree index on the column serve with a range scan?"
-  options={[
-    'Only equality conditions such as subsidiary_id = 20',
-    'Equality, inequality, BETWEEN, and LIKE patterns with a fixed prefix',
-    'Any condition at all, including LIKE with a leading wildcard',
-  ]}
-  answer={1}
-  explain="The leaf nodes are sorted, so any condition that defines a start and an end in that order can be served by a range scan. A LIKE with a leading wildcard has no start point and cannot."
-/>

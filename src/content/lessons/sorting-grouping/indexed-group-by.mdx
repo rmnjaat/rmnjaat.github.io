@@ -3,26 +3,17 @@ title: Indexed GROUP BY
 subtitle: Grouping has two algorithms, hash and sort/group, and neither is pipelined by itself. An index in grouping order removes the sort from the second one and makes it a pipeline.
 chapter: sorting-grouping
 order: 3
-kind: lesson
-minutes: 9
 summary: The hash and the sort/group algorithms for GROUP BY, how an index that delivers rows in grouping-key order turns the sort/group algorithm into a pipelined group by, what breaks it, where the hash algorithm still wins, and the engine-specific traps around ASC/DESC and NULL ordering.
-prereqs: "You should have read <a href='/sql/sorting-grouping/indexed-order-by/'>Indexed ORDER BY</a>, because a pipelined GROUP BY has the same prerequisites."
-outcomes:
-  - How the hash algorithm and the sort/group algorithm aggregate rows, and why both normally materialize
-  - How an index in grouping-key order lets the sort/group algorithm skip the sort and run pipelined
-  - Why a range condition ahead of the grouping column brings the sort or the hash back
-  - What the hash algorithm still does better, and why pipelining matters more than raw speed
-  - The PostgreSQL and Oracle corner cases with ASC/DESC and NULL ordering
 recap:
   - The hash algorithm keeps one entry per group in a temporary hash table and returns it after the last input row. The sort/group algorithm sorts by the grouping key and aggregates adjacent rows. Both materialize an intermediate state.
   - An index that delivers the where-filtered rows in grouping-key order removes the sort from the sort/group algorithm. The GROUP BY becomes pipelined, and the plan shows no sort at all, or SORT GROUP BY NOSORT in Oracle.
   - The prerequisites are those of the pipelined ORDER BY, minus ASC and DESC. A range on a column ahead of the grouping column breaks it.
-  - The hash algorithm needs less memory because it buffers only the aggregated result. The pipelined group by matters because it delivers the first group before reading all input, which Unit 7 builds on.
+  - The hash algorithm needs less memory because it buffers only the aggregated result. The pipelined group by matters because it delivers the first group before reading all input, which Chapter 7 builds on.
 source: https://use-the-index-luke.com/sql/sorting-grouping/indexed-group-by
 ---
-import { Callout, KeyIdea, EngineTabs, Check, TryIt } from '@/components/mdx';
+import { Callout, KeyIdea, EngineTabs } from '@/components/mdx';
 
-A `GROUP BY` has to bring together every row that shares a key before it can produce a single aggregate. Databases do that in one of two ways, and only one of the two can take advantage of an index. This lesson shows how that one becomes a pipeline, using the same index as the previous two lessons.
+A `GROUP BY` has to bring together every row that shares a key before it can produce a single aggregate. Databases do that in one of two ways, and only one of the two can take advantage of an index. This page shows how that one becomes a pipeline, using the same index as the previous two pages.
 
 ## 1. Two ways to group
 
@@ -45,7 +36,7 @@ SELECT product_id, sum(eur_value)
  GROUP BY product_id
 ```
 
-The index `sales_dt_pr` on `(sale_date, product_id)` from the [previous lesson](/sql/sorting-grouping/order-by-asc-desc-nulls-last/) finds the day with a range scan, and inside that day the entries are in product order. That is exactly the order the sort/group algorithm needs, so the database can skip the sort and the materialization that comes with it.
+The index `sales_dt_pr` on `(sale_date, product_id)` from the [previous page](/sql/sorting-grouping/order-by-asc-desc-nulls-last/) finds the day with a range scan, and inside that day the entries are in product order. That is exactly the order the sort/group algorithm needs, so the database can skip the sort and the materialization that comes with it.
 
 <EngineTabs>
   <Fragment slot="db2">
@@ -121,7 +112,7 @@ Oracle will not combine a backward index read with a pipelined group by when an 
 
 ## 3. Where it breaks
 
-Widen the where clause to every sale since yesterday, as the first lesson did for `ORDER BY`.
+Widen the where clause to every sale since yesterday, as the first page did for `ORDER BY`.
 
 ```sql
 SELECT product_id, sum(eur_value)
@@ -171,40 +162,7 @@ The range scan now covers several days, and the entries are in product order wit
 
 Oracle's choice above is not a mistake. The hash algorithm only has to buffer the aggregated result, one entry per group, while the sort/group algorithm has to materialize the complete input before it can aggregate anything. When the index cannot supply the order, hashing needs far less memory than sorting, and the optimizer is right to pick it.
 
-That puts the pipelined group by in perspective. Its point is not that it is the fastest way to compute a sum. Its point is that it delivers the first group before it has read the whole input, the same property the pipelined `ORDER BY` has. That is the precondition for everything in [Unit 7](/sql/partial-results/), where the query stops after a few rows.
+That puts the pipelined group by in perspective. Its point is not that it is the fastest way to compute a sum. Its point is that it delivers the first group before it has read the whole input, the same property the pipelined `ORDER BY` has. That is the precondition for everything in [Chapter 7](/sql/partial-results/), where the query stops after a few rows.
 
 <KeyIdea title="Remember">Fast execution is the lesser benefit. The pipelined group by matters because the first result leaves before the last row is read.</KeyIdea>
 
-## 5. Try it yourself
-
-SQLite has no hash aggregate. When no index supplies the order it sorts, and the plan says `USE TEMP B-TREE FOR GROUP BY`. The playground has `sales_dt_pr` on `(sale_date, product_id)` ready.
-
-<TryIt id="6.3" setup={`CREATE INDEX sales_dt_pr ON sales (sale_date, product_id);`} tasks={[
-  { text: 'Run the query as given. One <code>SEARCH sales USING INDEX sales_dt_pr</code> line, no temp b-tree: a pipelined group by.', sql: "sale_date\\s*=\\s*'2024-03-05'[\\s\\S]*group\\s+by\\s+product_id", plan: '^(?![\\s\\S]*TEMP B-TREE)SEARCH sales USING INDEX sales_dt_pr' },
-  { text: 'Change <code>=</code> to <code>&gt;=</code>. The index is still used for the range, but <code>USE TEMP B-TREE FOR GROUP BY</code> returns.', sql: 'sale_date\\s*>=', plan: 'TEMP B-TREE FOR GROUP BY' },
-  { text: 'Change it back and replace <code>sum(eur_value)</code> with <code>count(*)</code>. The plan now says <code>COVERING INDEX</code>: pipelined and index-only.', sql: 'count\\s*\\(\\s*\\*\\s*\\)', plan: 'COVERING INDEX sales_dt_pr' },
-]} sql={`SELECT product_id, sum(eur_value)
-  FROM sales
- WHERE sale_date = '2024-03-05'
- GROUP BY product_id;`}>
-  <Fragment slot="hints">
-    <details class="hint"><summary>Hint for task 3</summary><div class="d">count(*) needs no column from the table, so the index alone answers the query. For sum(eur_value) the table has to be read unless eur_value is added to the index.</div></details>
-    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT product&#95;id, count(&#42;)
-  FROM sales
- WHERE sale&#95;date = '2024-03-05'
- GROUP BY product&#95;id;
--- plan: SEARCH sales USING COVERING INDEX sales&#95;dt&#95;pr (sale&#95;date=?)</pre></div></details>
-  </Fragment>
-</TryIt>
-
-<Check
-  client:visible
-  question="Sorting and grouping can both use an index to avoid a sort. Which other operation from earlier units can do the same?"
-  options={[
-    'The nested loops join, because it probes the inner index once per outer row.',
-    'The sort-merge join, because both inputs have to be sorted on the join key before merging.',
-    'The hash join, because the hash table is built in key order.',
-  ]}
-  answer={1}
-  explain="A sort-merge join sorts both sides on the join columns and then walks them together. If an index delivers one side in join-key order, that side's sort can be skipped, exactly as for ORDER BY and GROUP BY. Nested loops and hash joins do not need sorted input."
-/>

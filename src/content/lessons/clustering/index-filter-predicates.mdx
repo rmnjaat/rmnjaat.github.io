@@ -3,15 +3,7 @@ title: Index Filter Predicates Used Intentionally
 subtitle: A filter predicate in the index is usually a warning sign. Sometimes it is the whole point, because the index is a narrow, sorted copy of the table that is cheap to filter, and the table access it saves is where the time goes.
 chapter: clustering
 order: 1
-kind: lesson
-minutes: 10
 summary: "The second power of indexing, clustering, shown through an index filter predicate used on purpose: extending an existing index with a column that a leading-wildcard LIKE cannot search, so that most candidate rows are rejected before the table is read. Covers the clustering factor, row sequencing, and when not to do it."
-prereqs: "You should know the difference between access and filter predicates (<a href='/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates/'>Greater, less and between</a>) and why a leading wildcard cannot use the tree (<a href='/sql/where-clause/searching-for-ranges/like-performance-tuning/'>LIKE</a>)."
-outcomes:
-  - What a data cluster is and why the sorted leaf nodes of an index make it the simplest clustering tool
-  - Why the table access, not the index scan, dominates the cost of a typical lookup, and how the clustering factor measures it
-  - How adding a column that cannot be an access predicate still cuts the number of table reads
-  - Why to extend an existing index rather than create a new one, and why column order still comes first
 recap:
   - Clustering means storing data that is read together close together. The row is the smallest cluster; an index clusters rows with similar values because its leaves are sorted. That is the second power of indexing.
   - Table access is the expensive part of an index lookup, because the matching rows are scattered over the table's blocks. The index clustering factor measures how scattered.
@@ -19,19 +11,19 @@ recap:
   - Extend an existing index, put the access column first, and only add filter columns that reject many rows. Every column makes the index bigger and slower to maintain.
 source: https://use-the-index-luke.com/sql/clustering/index-filter-predicates
 ---
-import { Callout, KeyIdea, Check, TryIt, IndexAccess, EngineTabs } from '@/components/mdx';
+import { Callout, KeyIdea, IndexAccess, EngineTabs } from '@/components/mdx';
 
-The word cluster means different things. A star cluster is a group of stars; a computer cluster is a group of machines that work together, for performance or for failover. In a database conversation "let's use a cluster" could mean either of those or something else entirely: a **data cluster**, which is data that is read together stored together, so that reading it takes fewer I/O operations. This unit is about data clusters, and about the fact that an index is the simplest tool for building one.
+The word cluster means different things. A star cluster is a group of stars; a computer cluster is a group of machines that work together, for performance or for failover. In a database conversation "let's use a cluster" could mean either of those or something else entirely: a **data cluster**, which is data that is read together stored together, so that reading it takes fewer I/O operations. This chapter is about data clusters, and about the fact that an index is the simplest tool for building one.
 
 ## 1. Clusters, from the row up
 
 The smallest cluster in a SQL database is the row. All columns of a row sit in the same block whenever they fit; only oversized rows, for example with LOB columns, spill over. Column stores turn that around and keep each column together instead, which suits data warehouses that read many rows but few columns.
 
-An index clusters too. Its leaf nodes hold the indexed values in sorted order, so rows with similar values end up next to each other in the index even when they are far apart in the table. [Unit 1](/sql/anatomy/) called the B-tree traversal the first power of indexing. This ability to group related data is the **second power of indexing**, and the three lessons of this unit show how to use it.
+An index clusters too. Its leaf nodes hold the indexed values in sorted order, so rows with similar values end up next to each other in the index even when they are far apart in the table. [Chapter 1](/sql/anatomy/) called the B-tree traversal the first power of indexing. This ability to group related data is the **second power of indexing**, and the three pages of this chapter show how to use it.
 
 ## 2. Where the time goes
 
-[Unit 2](/sql/where-clause/) drew a line between access predicates, which decide where an index scan starts and stops, and filter predicates, which are checked on every entry inside that range without narrowing it. A filter predicate in the index usually means the column order of a concatenated index is wrong. This lesson is about the case where it is exactly what you want: not to make the range scan faster, but to keep the rows a query needs together.
+[Chapter 2](/sql/where-clause/) drew a line between access predicates, which decide where an index scan starts and stops, and filter predicates, which are checked on every entry inside that range without narrowing it. A filter predicate in the index usually means the column order of a concatenated index is wrong. This page is about the case where it is exactly what you want: not to make the range scan faster, but to keep the rows a query needs together.
 
 Conditions that cannot be access predicates are the candidates. A `LIKE` with a leading wildcard is the classic one:
 
@@ -42,7 +34,7 @@ SELECT first_name, last_name, subsidiary_id, phone_number
    AND UPPER(last_name) LIKE '%INA%'
 ```
 
-The pattern cannot use the tree, so an index on `last_name`, or on `UPPER(last_name)`, would not narrow the scanned range at all. The condition on `subsidiary_id`, on the other hand, is a fine access predicate, and it needs no new index: since [Unit 2](/sql/where-clause/the-equals-operator/concatenated-keys/) swapped the primary key to `(subsidiary_id, employee_id)`, `subsidiary_id` already leads the primary key index.
+The pattern cannot use the tree, so an index on `last_name`, or on `UPPER(last_name)`, would not narrow the scanned range at all. The condition on `subsidiary_id`, on the other hand, is a fine access predicate, and it needs no new index: since [Chapter 2](/sql/where-clause/the-equals-operator/concatenated-keys/) swapped the primary key to `(subsidiary_id, employee_id)`, `subsidiary_id` already leads the primary key index.
 
 <EngineTabs>
   <Fragment slot="oracle">
@@ -118,7 +110,7 @@ CREATE INDEX empsubupnam ON employees
        (subsidiary_id, UPPER(last_name))
 ```
 
-`subsidiary_id` comes first, so it still serves as the access predicate. `UPPER(last_name)` serves the `LIKE` as an index filter predicate. Indexing the uppercase form saves a few CPU cycles per comparison; an index on the plain `last_name` would do the same job, and the next lesson gives a reason to prefer it.
+`subsidiary_id` comes first, so it still serves as the access predicate. `UPPER(last_name)` serves the `LIKE` as an index filter predicate. Indexing the uppercase form saves a few CPU cycles per comparison; an index on the plain `last_name` would do the same job, and the next page gives a reason to prefer it.
 
 <IndexAccess client:visible n="5.1" leaves={2} rows={2} />
 
@@ -165,7 +157,7 @@ Step through the figure. The access predicate confines the scan to a couple of l
     Filter: (upper(last_name) ~~ '%INA%'::text)
     Rows Removed by Filter: 316
   ```
-  PostgreSQL applies `Filter` after fetching the row, even when the column is in the index, so this plan still reads 333 rows. The filter runs on index entries only in an `Index Only Scan`, which needs the select list covered as well; the next lesson shows how. The [PostgreSQL plan page](/sql/explain-plan/postgresql/) explains how to tell the two apart.
+  PostgreSQL applies `Filter` after fetching the row, even when the column is in the index, so this plan still reads 333 rows. The filter runs on index entries only in an `Index Only Scan`, which needs the select list covered as well; the next page shows how. The [PostgreSQL plan page](/sql/explain-plan/postgresql/) explains how to tell the two apart.
   </Fragment>
   <Fragment slot="sql-server">
   ```
@@ -197,7 +189,7 @@ Read the `Rows` column of the two Oracle plans. Both end at 17. In the first pla
 
 <KeyIdea>An index filter predicate does not make the index scan faster. It makes the table access run fewer times, and the table access is where the time goes.</KeyIdea>
 
-<Callout kind="warning" title="Do not add a new index for this">Never create an index just to hold a filter predicate. Extend an existing one instead, so that the maintenance cost on every write ([Unit 8](/sql/dml/)) stays low. A few engines go as far as letting you append non-key columns to the primary key index itself.</Callout>
+<Callout kind="warning" title="Do not add a new index for this">Never create an index just to hold a filter predicate. Extend an existing one instead, so that the maintenance cost on every write ([Chapter 8](/sql/dml/)) stays low. A few engines go as far as letting you append non-key columns to the primary key index itself.</Callout>
 
 ## 4. When it is worth it
 
@@ -205,40 +197,5 @@ The example looks like a confirmation of the folk rule "index every column in th
 
 An index also grows with every column, text columns in particular. A bigger index is never faster by itself, even if logarithmic scalability keeps the damage small. So do not put all where-clause columns into the index on principle. Add a filter column intentionally, when the access predicate already narrows the scan to a few leaves, the filter rejects most of the entries in them, and the query runs often enough to pay for the wider index.
 
-<Callout kind="tip" title="Related pages">The [glossary entry](/sql/glossary/) for index filter predicates; [access and filter predicates by example](/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates/); [what an accidental filter predicate costs at volume](/sql/testing-scalability/data-volume/); [why anywhere-LIKE cannot be an access predicate](/sql/where-clause/searching-for-ranges/like-performance-tuning/); and how to spot filter predicates in [Oracle](/sql/explain-plan/oracle/), [PostgreSQL](/sql/explain-plan/postgresql/) and [SQL Server](/sql/explain-plan/sql-server/) plans.</Callout>
+<Callout kind="tip" title="Related pages">[Access and filter predicates by example](/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates/); [what an accidental filter predicate costs at volume](/sql/testing-scalability/data-volume/); [why anywhere-LIKE cannot be an access predicate](/sql/where-clause/searching-for-ranges/like-performance-tuning/); and how to spot filter predicates in [Oracle](/sql/explain-plan/oracle/), [PostgreSQL](/sql/explain-plan/postgresql/) and [SQL Server](/sql/explain-plan/sql-server/) plans.</Callout>
 
-## 5. See the filter run in the index
-
-The playground creates `employees_sub_name` on `(subsidiary_id, last_name)`; the playground's primary key still has `employee_id` first, so the index supplies the leading `subsidiary_id`. SQLite does not print filter predicates in its plan, so use the select list to prove where the filter runs. With only `last_name` selected, the plan says `COVERING INDEX`: the `LIKE` is checked on the index entries and the table is never touched. Of the 200 employees in subsidiary 30, 33 match.
-
-<TryIt id="5.1" setup={`CREATE INDEX employees_sub_name ON employees (subsidiary_id, last_name);`} tasks={[
-  { text: 'Run the query. The plan says <code>SEARCH employees USING COVERING INDEX employees_sub_name (subsidiary_id=?)</code>. The parentheses hold the access predicate only; the <code>LIKE</code> is applied to the entries.', sql: "like\\s*'%an%'", plan: 'COVERING INDEX employees_sub_name' },
-  { text: 'Add <code>first_name</code> and <code>phone_number</code> to the select list. The plan drops to <code>USING INDEX</code>: the table is now visited, but only for the 33 entries that pass the filter.', sql: 'phone_number[\\s\\S]*like', plan: 'USING INDEX employees_sub_name' },
-  { text: 'Remove the <code>subsidiary_id = 30</code> condition. Without an access predicate there is nothing to search for; the plan becomes a full <code>SCAN</code> (of the narrower index, since only <code>last_name</code> is selected) and every one of the 1,000 entries is tested.', sql: "^(?![\\s\\S]*subsidiary_id\\s*=)[\\s\\S]*like\\s*'%an%'", plan: '^SCAN employees' },
-]} sql={`SELECT last_name
-  FROM employees
- WHERE subsidiary_id = 30
-   AND last_name LIKE '%an%';`}>
-  <Fragment slot="hints">
-    <details class="hint"><summary>Hint for task 2</summary><div class="d">Keep the where clause as it is; only the select list changes. <code>USING INDEX</code> without <code>COVERING</code> means the index found the entries and the table supplied the other columns.</div></details>
-    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT first&#95;name, last&#95;name, phone&#95;number
-  FROM employees
- WHERE subsidiary&#95;id = 30
-   AND last&#95;name LIKE '%an%';
--- plan: SEARCH employees USING INDEX employees&#95;sub&#95;name (subsidiary&#95;id=?)
-SELECT last&#95;name FROM employees WHERE last&#95;name LIKE '%an%';
--- plan: SCAN employees USING COVERING INDEX employees&#95;sub&#95;name</pre></div></details>
-  </Fragment>
-</TryIt>
-
-<Check
-  client:visible
-  question="The index on employees changes from (subsidiary_id) to (subsidiary_id, last_name). For WHERE subsidiary_id = 30 AND last_name LIKE '%an%', what gets cheaper?"
-  options={[
-    'The tree traversal, because the index is more selective.',
-    'The leaf scan, because fewer index entries are read.',
-    'The table access, because rows that fail the LIKE are rejected before they are fetched.',
-  ]}
-  answer={2}
-  explain="The traversal has the same depth, and the scan still covers every entry for subsidiary 30 because a leading wildcard cannot narrow the range. What disappears is the table access for the five out of six entries the filter rejects, and the table access was the expensive part."
-/>

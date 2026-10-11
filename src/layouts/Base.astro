@@ -4,13 +4,11 @@ import '@fontsource-variable/geist-mono';
 import '../styles/global.css';
 import Header from '../components/ui/Header.astro';
 import { siteName, siteTagline } from '../lib/site';
-import { getCollection } from 'astro:content';
-const totalItems = (await getCollection('lessons')).length;
 
 interface Props {
   title: string;
   description?: string;
-  current?: 'course' | 'playground' | 'plans' | 'glossary' | 'practice';
+  current?: 'contents' | 'plans' | 'myths' | 'schema' | 'about';
 }
 const { title, description = siteTagline, current } = Astro.props;
 const fullTitle = title === siteName ? `${siteName} · ${siteTagline}` : `${title} · ${siteName}`;
@@ -27,21 +25,17 @@ const fullTitle = title === siteName ? `${siteName} · ${siteTagline}` : `${titl
     <meta property="og:type" content="article" />
     <meta name="theme-color" content="#FFFFFF" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <script is:inline>
-      (function () { try { document.documentElement.dataset.engine = localStorage.getItem('util:engine') || 'postgresql'; } catch (e) {} })();
-    </script>
   </head>
-  <body data-total-items={totalItems}>
+  <body>
     <Header current={current} />
     <slot />
     <footer class="site-footer">
       <div class="bar">
         <span>{siteName} · {siteTagline}</span>
-        <a href="/sql/">Table of contents</a>
+        <a href="/sql/">Contents</a>
         <a href="/sql/example-schema/">Example schema</a>
-        <a href="/playground/">Playground</a>
         <a href="/sql/about/">About</a>
-        <span style="margin-left:auto">Based on the book by Markus Winand. Rewritten and extended; the original is at <a href="https://use-the-index-luke.com" rel="noopener">use-the-index-luke.com</a>.</span>
+        <span style="margin-left:auto">Based on the book by Markus Winand. Rewritten; the original is at <a href="https://use-the-index-luke.com" rel="noopener">use-the-index-luke.com</a>.</span>
       </div>
     </footer>
   </body>

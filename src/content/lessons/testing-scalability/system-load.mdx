@@ -3,16 +3,7 @@ title: System Load
 subtitle: The optimizer picks an index because it beats a table scan, not because it is the right one. Under production load, the difference between those two things is thirty seconds.
 chapter: testing-scalability
 order: 2
-kind: lesson
-minutes: 8
 summary: Why "the index is used" is not the end of the analysis, where each database hides its predicate information, what concurrent load does to a query with a filter predicate, and why plan inspection beats a benchmark.
-prereqs: "You should have read <a href='/sql/testing-scalability/data-volume/'>Data volume</a> and be able to tell an access predicate from a filter predicate in a plan."
-outcomes:
-  - Why the optimizer's choice of an index does not mean the index is optimal
-  - Where the predicate information hides in SQL Server, MySQL and PostgreSQL plans
-  - How a filter predicate that costs one second at rest costs thirty under concurrent load
-  - Why reading the plan tells you more than a quick benchmark, and what a stress test is still good for
-  - Why production hardware is often slower than the development machine
 recap:
   - The optimizer uses an index when it is cheaper than a full table scan. That is a low bar, and clearing it says nothing about column order.
   - Predicate information is often hidden, behind a hover tooltip in SQL Server or encoded in columns in MySQL. Go looking for it.
@@ -21,9 +12,9 @@ recap:
   - Production infrastructure accumulates latencies that development does not have. Do not expect bigger hardware to make a suspicious query fast.
 source: https://use-the-index-luke.com/sql/testing-scalability/system-load
 ---
-import { Callout, KeyIdea, Figure, Check, EngineTabs } from '@/components/mdx';
+import { Callout, KeyIdea, Figure, EngineTabs } from '@/components/mdx';
 
-Thinking about a multi-column index usually stops at the first plan that shows the index being used. That is too early. The optimizer did not choose the index because it is right for the query; it chose it because it is cheaper than reading the whole table, which is a low bar. The previous lesson showed how hard it is to see the wrong column order in a plan. This one shows what that mistake costs once the system is busy.
+Thinking about a multi-column index usually stops at the first plan that shows the index being used. That is too early. The optimizer did not choose the index because it is right for the query; it chose it because it is cheaper than reading the whole table, which is a low bar. The previous page showed how hard it is to see the wrong column order in a plan. This one shows what that mistake costs once the system is busy.
 
 ## 1. "Used" is not "optimal"
 
@@ -33,7 +24,7 @@ An index with the columns in the wrong order still beats a full table scan, so t
 
 <EngineTabs>
   <Fragment slot="sql-server">
-  Management Studio's graphical plan shows predicate information only as a tooltip: hover over the `Index Seek` operator and read the box. For the `scale_slow` plan of the previous lesson the tooltip lists `Seek Predicates` for `section` and a plain `Predicate` for `id2`. The plain `Predicate` is the filter. The text plan from `SET STATISTICS PROFILE ON` shows the same thing as `SEEK:(...)` against `WHERE:(...)`.
+  Management Studio's graphical plan shows predicate information only as a tooltip: hover over the `Index Seek` operator and read the box. For the `scale_slow` plan of the previous page the tooltip lists `Seek Predicates` for `section` and a plain `Predicate` for `id2`. The plain `Predicate` is the filter. The text plan from `SET STATISTICS PROFILE ON` shows the same thing as `SEEK:(...)` against `WHERE:(...)`.
 
   ```
   |--Index Seek(OBJECT:scale_slow),
@@ -59,7 +50,7 @@ Wherever it hides and however small it looks, the predicate information decides 
 
 ## 3. Response time under load
 
-The measurement from the previous lesson is now repeated with the data volume fixed at the largest section, so the last point of [Figure 3.2](/sql/testing-scalability/data-volume/) is the first point here, and the number of queries running concurrently is turned up from one to 25.
+The measurement from the previous page is now repeated with the data volume fixed at the largest section, so the last point of [Figure 3.2](/sql/testing-scalability/data-volume/) is the first point here, and the number of queries running concurrently is turned up from one to 25.
 
 <Figure n="3.3" title="Response time against concurrent load, data volume fixed at section 100">
 <table>
@@ -88,20 +79,9 @@ A stress test under realistic data and realistic concurrency is the only way to 
 
 ## 5. Production hardware is not a safety net
 
-Suspicious response times tend to be waved through during development on the assumption that the "more powerful production hardware" will absorb them. It usually goes the other way. Production infrastructure is more complex than a developer's machine: the application and the database are on separate servers, there may be a firewall between them, there is a load balancer in front, and every hop adds latency that the development environment never had. Even when the test environment is a faithful copy of production, background load still makes the same query slower there. The [next lesson](/sql/testing-scalability/response-time-throughput-scaling-horizontal/) explains why bigger hardware is in general not something to expect faster single queries from.
+Suspicious response times tend to be waved through during development on the assumption that the "more powerful production hardware" will absorb them. It usually goes the other way. Production infrastructure is more complex than a developer's machine: the application and the database are on separate servers, there may be a firewall between them, there is a load balancer in front, and every hop adds latency that the development environment never had. Even when the test environment is a faithful copy of production, background load still makes the same query slower there. The [next page](/sql/testing-scalability/response-time-throughput-scaling-horizontal/) explains why bigger hardware is in general not something to expect faster single queries from.
 
 <Callout kind="warning" title="Common mistake">"It is a bit slow here, but production is a much bigger machine." Bigger production machines usually serve more users and sit behind more network hops. A query that is a bit slow on an idle laptop is the one most likely to be very slow there.</Callout>
 
 <Callout kind="note" title="Further reading">On latency in layered infrastructure: [Latency: Security vs. Performance](https://blog.fatalmind.com/2009/12/22/latency-security-vs-performance/). On the reflex of adding servers: James Golick, [We are experiencing too much load. Let's add a new server](https://jamesgolick.com/2010/10/27/we-are-experiencing-too-much-load-lets-add-a-new-server..html).</Callout>
 
-<Check
-  client:visible
-  question="A query takes one second on a full copy of the production data with nobody else connected. Under 25 concurrent copies of itself it takes 32 seconds. What is the most likely reason?"
-  options={[
-    'The production hardware is thirty times slower than the test machine.',
-    'The query has a filter predicate, so it touches far more index entries than it returns, and every one of those reads gets more expensive when the system is busy.',
-    'The optimizer switches to a full table scan when the system is busy.',
-  ]}
-  answer={1}
-  explain="The data and the plan are the same in both runs; only the load changed. Load raises the cost of each block read, and a filter predicate scan reads many more blocks than an access predicate scan. In the original measurement, the query with access predicates stayed under two seconds at the same load."
-/>

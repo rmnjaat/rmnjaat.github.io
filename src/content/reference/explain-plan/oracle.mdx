@@ -67,7 +67,7 @@ The plan is a table with one row per operation. Indentation under `Operation` sh
 | `WINDOW NOSORT STOPKEY` | A window function such as `ROW_NUMBER()` whose order comes from the child, with the row limit of `FETCH FIRST` applied on the fly. The combination for pipelined top-N queries. |
 | `VIEW` | An inline view or subquery that was not merged into the parent. |
 
-A top-N query is only as fast as the operation below its `STOPKEY`. Stopping an `INDEX RANGE SCAN` after ten rows costs ten rows; stopping a `SORT ORDER BY` after ten rows still costs the whole sort, because the tenth row is not known until every row has been seen. The [top-N lesson](/sql/partial-results/top-n-queries/) builds on exactly this difference.
+A top-N query is only as fast as the operation below its `STOPKEY`. Stopping an `INDEX RANGE SCAN` after ten rows costs ten rows; stopping a `SORT ORDER BY` after ten rows still costs the whole sort, because the tenth row is not known until every row has been seen. The [top-N page](/sql/partial-results/top-n-queries/) builds on exactly this difference.
 
 ## Access predicates and filter predicates
 
@@ -150,7 +150,7 @@ The entries of subsidiary 20 are sorted by `last_name`, so `first_name` cannot d
 
 <Callout kind="important" title="Where the filter sits tells you what it costs">`filter()` on the `INDEX` line: the leaf chain is walked for the whole access range, but rows are fetched only for matches. `filter()` on the `TABLE ACCESS` line: every row in the range is fetched and then checked. Neither is as good as `access()`, which never reads the non-matching entries at all.</Callout>
 
-<Callout kind="warning" title="A filter on an index column is still a filter">An `INDEX RANGE SCAN` with every column of the where clause in `access()` looks like the job is done. If one of them is also a `filter()`, the scanned range grows with the table and the query will degrade with data volume and with load, long after the test system said it was fine. The [range lesson](/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates/) explains the split by example and the [data volume lesson](/sql/testing-scalability/data-volume/) measures the consequences.</Callout>
+<Callout kind="warning" title="A filter on an index column is still a filter">An `INDEX RANGE SCAN` with every column of the where clause in `access()` looks like the job is done. If one of them is also a `filter()`, the scanned range grows with the table and the query will degrade with data volume and with load, long after the test system said it was fine. The [range page](/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates/) explains the split by example and the [data volume page](/sql/testing-scalability/data-volume/) measures the consequences.</Callout>
 
 ## Reading the numbers
 

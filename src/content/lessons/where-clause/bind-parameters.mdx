@@ -3,16 +3,7 @@ title: Bind Parameters
 subtitle: Placeholders keep SQL safe and let the database reuse execution plans. They also hide the value from the optimizer, which sometimes matters.
 chapter: where-clause
 order: 3
-kind: lesson
-minutes: 12
 summary: What bind parameters do for security and plan caching, why the optimizer cannot use a column histogram for a bound value, the few cases where a literal is the better choice, how to bind in C#, Java, Perl, PHP and Ruby, and what placeholders cannot do.
-prereqs: "You should have read <a href='/sql/where-clause/the-equals-operator/slow-indexes-part-ii/'>Slow Indexes, Part II</a> and know that the optimizer chooses a plan by estimated cost."
-outcomes:
-  - What a bind parameter is and the two reasons programs should use them
-  - Why the same query gets two different plans for two subsidiaries, and one plan with a placeholder
-  - How to decide when a value should be a literal instead
-  - How to bind a value in five common languages
-  - What placeholders cannot replace, and what CURSOR_SHARING and forced parameterization do
 recap:
   - Bind parameters separate the SQL text from the values. That stops injection and lets one cached plan serve every execution.
   - With a literal the optimizer reads the histogram and may pick a different plan per value. With a placeholder it assumes an even distribution and builds one plan for all.
@@ -21,7 +12,7 @@ recap:
   - CURSOR_SHARING and forced parameterization replace literals automatically. They are a workaround for applications that never bind, and they take the choice away from you.
 source: https://use-the-index-luke.com/sql/where-clause/bind-parameters
 ---
-import { Callout, KeyIdea, EngineTabs, Check, TryIt } from '@/components/mdx';
+import { Callout, KeyIdea, EngineTabs } from '@/components/mdx';
 
 Most SQL textbooks skip this topic, and most slow applications pay for it. There are two ways to get a value into a where clause. Write it into the SQL text, or leave a placeholder in the text and hand the value over separately. The placeholder is a **bind parameter**, also called a bind variable or dynamic parameter.
 
@@ -130,7 +121,7 @@ As the developer you can resolve the dilemma yourself, because you know which va
 
 <KeyIdea>Always use bind parameters, except for values that are meant to influence the execution plan.</KeyIdea>
 
-The classic example is a status column with a skewed distribution, `todo` and `done`. The `done` rows outnumber the `todo` rows by an order of magnitude, so an index only pays off for the `todo` search; a literal lets the optimizer see which one it is. Partitioning is another: when tables and indexes are split across storage areas, the value decides which partitions have to be read. And `LIKE` patterns can suffer from bind parameters too, as the [LIKE lesson](/sql/where-clause/searching-for-ranges/like-performance-tuning/) shows.
+The classic example is a status column with a skewed distribution, `todo` and `done`. The `done` rows outnumber the `todo` rows by an order of magnitude, so an index only pays off for the `todo` search; a literal lets the optimizer see which one it is. Partitioning is another: when tables and indexes are split across storage areas, the value decides which partitions have to be read. And `LIKE` patterns can suffer from bind parameters too, as the [LIKE page](/sql/where-clause/searching-for-ranges/like-performance-tuning/) shows.
 
 <Callout kind="tip">In practice there are only a few cases where the value changes the plan. When in doubt, bind, if only to rule out SQL injection.</Callout>
 
@@ -285,29 +276,3 @@ The more elaborate the optimizer and the more complex the queries, the more plan
 
 Both are workarounds for applications that never bind. Switching them on also means a developer can no longer use a literal on purpose where the value should shape the plan. [Smart Logic](/sql/where-clause/obfuscation/smart-logic/) has more on the plan caches of the different databases, and the article [Planning for Execution Plan Reuse](https://use-the-index-luke.com/blog/2011-07-16/planning-for-reuse) goes deeper.
 
-## 7. Try it
-
-SQLite's `EXPLAIN QUERY PLAN` prints a `?` for every value, whether you wrote a literal or a placeholder, and in the playground's build it plans without looking at the value at all. That makes it a good illustration of the generic plan: run the query for the big subsidiary and the small one and compare the plan text.
-
-<TryIt id="2.7" setup={`CREATE INDEX emp_sub ON employees (subsidiary_id);`} tasks={[
-  { text: 'Run the query for subsidiary 20, which holds half of all employees. The plan says <code>SEARCH employees USING INDEX emp_sub (subsidiary_id=?)</code>.', sql: 'subsidiary_id\\s*=\\s*20', plan: 'USING INDEX emp_sub \\(subsidiary_id=\\?\\)' },
-  { text: 'Change the value to 30, a fifth of the employees. The plan text is identical: one plan, whatever the value.', sql: 'subsidiary_id\\s*=\\s*30', plan: 'USING INDEX emp_sub \\(subsidiary_id=\\?\\)' },
-]} sql={`SELECT first_name, last_name
-  FROM employees
- WHERE subsidiary_id = 20;`}>
-  <Fragment slot="hints">
-    <details class="hint"><summary>What a value-aware optimizer would do</summary><div class="d">With a histogram and a literal, Oracle could pick a different plan per subsidiary, as section 2 shows on the book's larger table. With a bound value it would do what SQLite does here: one plan for both.</div></details>
-  </Fragment>
-</TryIt>
-
-<Check
-  client:visible
-  question="A query filters on subsidiary_id, which has ten distinct values of very different sizes. The application binds the value. What does the optimizer do?"
-  options={[
-    'It reads the histogram for the bound value and picks the best plan for that subsidiary.',
-    'It cannot see the value, so it costs the plan for an average subsidiary and reuses that plan for all of them.',
-    'It refuses to cache the plan, because a bound value makes caching impossible.',
-  ]}
-  answer={1}
-  explain="The plan is built before the value is known, so the histogram cannot be consulted. The optimizer assumes an even distribution and the cached plan serves every value. Each database has a mitigation, such as bind peeking or re-optimisation, but the default behaviour is one plan for all."
-/>

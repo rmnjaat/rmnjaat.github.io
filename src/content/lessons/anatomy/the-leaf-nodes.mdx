@@ -3,27 +3,18 @@ title: The Leaf Nodes
 subtitle: An index is a separate, redundant structure that keeps the indexed columns in order. It stays sorted under constant change because its leaf nodes form a doubly linked list.
 chapter: anatomy
 order: 1
-kind: lesson
-minutes: 8
 summary: What an index is and is not, why a sorted structure must keep logical order separate from physical order, how leaf nodes and the doubly linked list achieve that, and what an index entry contains.
-prereqs: "None beyond the <a href='/sql/preface/'>preface</a>. You should know what a table and a primary key are."
-outcomes:
-  - What an index is, and why it is pure redundancy that leaves the table untouched
-  - Why a printed directory cannot take inserts and a database index must
-  - How a doubly linked list keeps entries in logical order without moving data
-  - What a leaf node, a database block and an index entry are
-  - Why the table itself has no order at all
 recap:
   - An index is a separate structure built by CREATE INDEX. It takes its own space, holds a copy of the indexed columns, and never changes the table.
   - Sorted order is what makes a lookup fast, and sorted order must survive every insert, delete and update without moving large amounts of data.
   - Entries live in leaf nodes, one per database block of a few kilobytes. Inside a node they are sorted; between nodes a doubly linked list keeps the order, so a node can sit anywhere on disk.
   - Each entry is the indexed columns plus a ROWID pointing to the table row. The table itself is an unsorted heap.
-  - The list can be read forwards or backwards, but it has no shortcut into the middle. That is what the tree in the next lesson adds.
+  - The list can be read forwards or backwards, but it has no shortcut into the middle. That is what the tree in the next page adds.
 source: https://use-the-index-luke.com/sql/anatomy/the-leaf-nodes
 ---
-import { Callout, KeyIdea, Figure, Check, TryIt, LeafChain } from '@/components/mdx';
+import { Callout, KeyIdea, Figure, LeafChain } from '@/components/mdx';
 
-"An index makes the query fast" is the shortest explanation of an index there is, and it is true. It is also useless for deciding which index to create, or for understanding why a query with an index is still slow. This unit opens the index up far enough to answer those questions and no further: the structure, not the implementation details.
+"An index makes the query fast" is the shortest explanation of an index there is, and it is true. It is also useless for deciding which index to create, or for understanding why a query with an index is still slow. This chapter opens the index up far enough to answer those questions and no further: the structure, not the implementation details.
 
 ## 1. A separate, redundant structure
 
@@ -37,7 +28,7 @@ After this runs, the `sales` table is exactly what it was. Not one row moved, no
 
 The comparison with the index at the back of a book is accurate as far as it goes. The book index also takes its own pages, repeats words that already appear in the text, and exists only to point at the place where the real content is.
 
-<Callout kind="note" title="Clustered indexes and index-organized tables">SQL Server and MySQL's InnoDB engine stretch the word "index" a little further. A table whose rows are themselves stored inside an index structure is called a **clustered index** there; Oracle calls the same thing an **index-organized table**. For this unit, think of the table and the index as two separate things. [Unit 5](/sql/clustering/) covers the clustered variants and their trade-offs.</Callout>
+<Callout kind="note" title="Clustered indexes and index-organized tables">SQL Server and MySQL's InnoDB engine stretch the word "index" a little further. A table whose rows are themselves stored inside an index structure is called a **clustered index** there; Oracle calls the same thing an **index-organized table**. For this chapter, think of the table and the index as two separate things. [Chapter 5](/sql/clustering/) covers the clustered variants and their trade-offs.</Callout>
 
 ## 2. Sorted, and under constant change
 
@@ -53,7 +44,7 @@ Think about what a naive sorted array would cost. Inserting a sale dated 2024-03
 
 The logical order comes from a **doubly linked list**. Each node in the list holds a reference to the node before it and the node after it, like links in a chain. To insert a new node between two neighbours, the database changes the two neighbours' references to point at the newcomer and gives the newcomer references back to them. Where the new node physically lands is irrelevant; the links carry the order.
 
-Because every node knows both neighbours, the list can be walked in either direction. The database can read an index from the smallest key upwards or from the largest downwards, which [unit 6](/sql/sorting-grouping/) relies on for `ORDER BY ... DESC`.
+Because every node knows both neighbours, the list can be walked in either direction. The database can read an index from the smallest key upwards or from the largest downwards, which [chapter 6](/sql/sorting-grouping/) relies on for `ORDER BY ... DESC`.
 
 The structure is not exotic. Most standard libraries ship one.
 
@@ -96,43 +87,5 @@ The table side of that picture is as important as the index side. The table is a
 
 ## 6. What the list cannot do
 
-A linked list has one weakness, and it is the reason this lesson is not the whole story. To reach the leaf that holds 2024-06-15 by following links, the database would have to start at the first leaf and read every one before it. On a small index that is a few blocks. On a large one it is a scan of the whole index, which is no better than a scan of the table. The [next lesson](/sql/anatomy/the-tree/) adds the second structure, a balanced search tree, that jumps to the right leaf in a handful of reads and leaves the chain to do the one thing it is good at.
+A linked list has one weakness, and it is the reason this page is not the whole story. To reach the leaf that holds 2024-06-15 by following links, the database would have to start at the first leaf and read every one before it. On a small index that is a few blocks. On a large one it is a scan of the whole index, which is no better than a scan of the table. The [next page](/sql/anatomy/the-tree/) adds the second structure, a balanced search tree, that jumps to the right leaf in a handful of reads and leaves the chain to do the one thing it is good at.
 
-## 7. Try it yourself
-
-The playground is a real SQLite database with the example schema loaded, and this one runs the `CREATE INDEX` from section 1 before you start. The first query lists what SQLite has in its catalogue: the primary key index on `employees`, which it created on its own, and `sales_date`.
-
-<TryIt id="1.1" tasks={[
-  { text: 'Run the query as it is. You should see two indexes, and the <code>sql</code> column shows the statement that built <code>sales_date</code>.', sql: 'from\\s+sqlite_master' },
-  { text: 'Walk the leaf chain backwards: select <code>sale_date, eur_value</code> from <code>sales</code> ordered by <code>sale_date DESC</code> with <code>LIMIT 10</code>. The plan should mention <code>USING INDEX sales_date</code> and say nothing about sorting.', sql: 'order\\s+by\\s+sale_date\\s+desc', plan: 'USING INDEX sales_date' },
-  { text: 'Change <code>sale_date</code> to <code>eur_value</code> in both places. With no sorted structure to walk, the plan ends with <code>USE TEMP B-TREE FOR ORDER BY</code>.', sql: 'order\\s+by\\s+eur_value', plan: 'TEMP B-TREE' },
-]} setup={`CREATE INDEX sales_date ON sales (sale_date);`} sql={`SELECT name, tbl_name, sql
-  FROM sqlite_master
- WHERE type = 'index';`}>
-  <Fragment slot="hints">
-    <details class="hint"><summary>Hint for task 2</summary><div class="d">SQLite starts at the last leaf of <code>sales_date</code>, follows the backward links, and stops after ten entries. The plan says <code>SCAN sales USING INDEX sales_date</code>: a scan, because it walks the chain, but one that stops almost immediately.</div></details>
-    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT sale&#95;date, eur&#95;value
-  FROM sales
- ORDER BY sale&#95;date DESC
- LIMIT 10;
--- plan: SCAN sales USING INDEX sales&#95;date
-SELECT sale&#95;date, eur&#95;value
-  FROM sales
- ORDER BY eur&#95;value DESC
- LIMIT 10;
--- plan: SCAN sales
---       USE TEMP B-TREE FOR ORDER BY</pre></div></details>
-  </Fragment>
-</TryIt>
-
-<Check
-  client:visible
-  question="Why can a new entry go into an index without rewriting the entries that come after it?"
-  options={[
-    'Entries are stored in insertion order, so the new one is appended at the end.',
-    'Entries live in leaf nodes linked in both directions. Only the one leaf that covers the key changes, and the links stay valid wherever that leaf sits on disk.',
-    'The database rebuilds the whole index in the background after every insert.',
-  ]}
-  answer={1}
-  explain="Logical order is kept by the links between leaves, not by their position on disk. An insert changes one leaf, or splits it into two and fixes two pointers. Nothing else in the index moves."
-/>

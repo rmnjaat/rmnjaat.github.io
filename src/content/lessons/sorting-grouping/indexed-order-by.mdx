@@ -3,16 +3,7 @@ title: Indexed ORDER BY
 subtitle: A sort has to see its last input row before it can hand out the first. An index that is already in the right order makes the sort disappear, and the query becomes a pipeline.
 chapter: sorting-grouping
 order: 1
-kind: lesson
-minutes: 11
 summary: "The third power of indexing: how an index that matches the ORDER BY lets the database skip the sort, why the where clause decides whether the scanned range is in order, what the cost value hides, and how to find out why a sort is still there."
-prereqs: "You should know how a <a href='/sql/where-clause/searching-for-ranges/'>range scan</a> walks the leaf chain and how the column order of a <a href='/sql/where-clause/the-equals-operator/concatenated-keys/'>concatenated index</a> decides what is adjacent."
-outcomes:
-  - Why a sort cannot be pipelined and what that costs on large results
-  - How an index that covers both the where clause and the ORDER BY removes the sort operation
-  - Why only the scanned index range has to be in order, and how a range condition breaks that
-  - Why the cost value can go up when the plan gets simpler
-  - A two-step test that tells you why the database still sorts
 recap:
   - A sort needs every input row before it emits the first. Reading an index in order makes the sort disappear and the execution pipelined, which is the third power of indexing.
   - The index that serves the where clause must also deliver the ORDER BY order. Only the scanned range has to be sorted, so an equality on the leading column plus the sort columns after it is enough.
@@ -21,15 +12,15 @@ recap:
   - To find out why a sort is still there, spell the whole index column list out as the ORDER BY. If the sort stays, the optimizer chose it for cost; if it goes, the index order did not match.
 source: https://use-the-index-luke.com/sql/sorting-grouping/indexed-order-by
 ---
-import { Callout, KeyIdea, Figure, EngineTabs, Check, TryIt } from '@/components/mdx';
+import { Callout, KeyIdea, Figure, EngineTabs } from '@/components/mdx';
 
-Sorting is the kind of work a database cannot hide. It burns CPU, but the real problem is memory: a sort must read its whole input before it can emit a single row, so the entire intermediate result has to be buffered somewhere. Nothing about a sort is pipelined, and for a large result that is exactly the wrong property. An index, on the other hand, stores its entries presorted. Reading the index in order gives the database a sorted result for free, and this lesson is about making that happen.
+Sorting is the kind of work a database cannot hide. It burns CPU, but the real problem is memory: a sort must read its whole input before it can emit a single row, so the entire intermediate result has to be buffered somewhere. Nothing about a sort is pipelined, and for a large result that is exactly the wrong property. An index, on the other hand, stores its entries presorted. Reading the index in order gives the database a sorted result for free, and this page is about making that happen.
 
 ## 1. The third power of indexing
 
-An index is sorted exactly as if you had written its column list into an `ORDER BY` clause. [Unit 1](/sql/anatomy/) showed the leaf nodes as a sorted, doubly linked chain. If the leaves are already in the order the query wants, the database can walk the chain and skip the sort operation entirely.
+An index is sorted exactly as if you had written its column list into an `ORDER BY` clause. [Chapter 1](/sql/anatomy/) showed the leaf nodes as a sorted, doubly linked chain. If the leaves are already in the order the query wants, the database can walk the chain and skip the sort operation entirely.
 
-Skipping the sort is the smaller half of the gain. The larger half is that the first row leaves the database as soon as it has been found, without waiting for the last one. The `ORDER BY` executes as a pipeline. [Unit 7](/sql/partial-results/) builds efficient paging on that property, which is why it earns a name of its own.
+Skipping the sort is the smaller half of the gain. The larger half is that the first row leaves the database as soon as it has been found, without waiting for the last one. The `ORDER BY` executes as a pipeline. [Chapter 7](/sql/partial-results/) builds efficient paging on that property, which is why it earns a name of its own.
 
 <Callout kind="note" title="The three powers of indexing">The [B-tree traversal](/sql/anatomy/the-tree/) is the first power. [Clustering](/sql/clustering/) is the second. The pipelined `ORDER BY` is the third.</Callout>
 
@@ -254,38 +245,5 @@ There is a quick way to tell them apart. Rewrite the `ORDER BY` so it lists the 
 
 <KeyIdea title="Remember">Spell the whole index column list out as the `ORDER BY` to find out why the database sorts. Run it and look at the rows too: the index order is often not what you pictured.</KeyIdea>
 
-When the optimizer chose the sort for its cost, it is usually because it plans for the whole result. It picks the plan that gets to the *last* row fastest, and for a large result that may well be the full scan with a sort. If the database knows that the application will only fetch the first few rows, the calculation changes and the pipelined plan wins. Telling it so is what [Unit 7](/sql/partial-results/) is about.
+When the optimizer chose the sort for its cost, it is usually because it plans for the whole result. It picks the plan that gets to the *last* row fastest, and for a large result that may well be the full scan with a sort. If the database knows that the application will only fetch the first few rows, the calculation changes and the pipelined plan wins. Telling it so is what [Chapter 7](/sql/partial-results/) is about.
 
-## 6. Try it yourself
-
-The playground has the index `sales_dt_pr` on `(sale_date, product_id)` created in advance. SQLite calls its sort `USE TEMP B-TREE FOR ORDER BY`; a plan without that line is a pipelined `ORDER BY`.
-
-<TryIt id="6.1" setup={`CREATE INDEX sales_dt_pr ON sales (sale_date, product_id);`} tasks={[
-  { text: 'Run the query as given. The plan is a single <code>SEARCH sales USING INDEX sales_dt_pr</code> line, with no temp b-tree.', sql: "sale_date\\s*=\\s*'2024-03-05'", plan: '^(?![\\s\\S]*TEMP B-TREE)SEARCH sales USING INDEX sales_dt_pr' },
-  { text: 'Change <code>=</code> to <code>&gt;=</code> and sort by <code>product_id</code> only. The temp b-tree is back.', sql: 'sale_date\\s*>=[\\s\\S]*order\\s+by\\s+product_id', plan: 'TEMP B-TREE FOR ORDER BY' },
-  { text: 'Keep the <code>&gt;=</code> but write the full index definition into the ORDER BY: <code>ORDER BY sale_date, product_id</code>. The sort disappears, which tells you the index order was the reason, not the cost.', sql: 'sale_date\\s*>=[\\s\\S]*order\\s+by\\s+sale_date\\s*,\\s*product_id', plan: '^(?![\\s\\S]*TEMP B-TREE)SEARCH sales USING INDEX sales_dt_pr' },
-]} sql={`SELECT sale_date, product_id, quantity
-  FROM sales
- WHERE sale_date = '2024-03-05'
- ORDER BY sale_date, product_id;`}>
-  <Fragment slot="hints">
-    <details class="hint"><summary>Hint for task 2</summary><div class="d">The range covers many days. Inside it the entries are in product order per day, not overall.</div></details>
-    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT sale&#95;date, product&#95;id, quantity
-  FROM sales
- WHERE sale&#95;date &gt;= '2024-03-05'
- ORDER BY sale&#95;date, product&#95;id;
--- plan: SEARCH sales USING INDEX sales&#95;dt&#95;pr (sale&#95;date&gt;?)</pre></div></details>
-  </Fragment>
-</TryIt>
-
-<Check
-  client:visible
-  question="The index is sales (sale_date, product_id). The query is WHERE sale_date >= :d ORDER BY product_id and the plan shows a sort. You change the ORDER BY to sale_date, product_id and the sort disappears. What have you learned?"
-  options={[
-    'The optimizer preferred the sort for its cost estimate. Gather statistics and try again.',
-    'The scanned index range was not in product order, so the index could not serve the original ORDER BY.',
-    'The index is corrupt and needs to be rebuilt.',
-  ]}
-  answer={1}
-  explain="Writing the full index definition into the ORDER BY removes any mismatch between index order and requested order. If the sort then goes away, the mismatch was the reason. A range over several days leaves the entries in product order per day only, which is not product order overall."
-/>

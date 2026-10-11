@@ -3,15 +3,7 @@ title: ASC, DESC and NULLS FIRST/LAST
 subtitle: An index can be read backwards, so descending costs nothing. Mixing directions in one ORDER BY is where the index definition has to change, and NULL placement is where engines disagree.
 chapter: sorting-grouping
 order: 2
-kind: lesson
-minutes: 10
 summary: Reading an index in reverse for ORDER BY DESC, why mixed ASC and DESC in one ORDER BY cannot be served by either reading direction, how ASC and DESC in the index definition fix it, and which engines support NULLS FIRST and NULLS LAST in queries and in indexes.
-prereqs: "You should have read <a href='/sql/sorting-grouping/indexed-order-by/'>Indexed ORDER BY</a> and know that only the scanned index range has to be in order."
-outcomes:
-  - How the database finds the last matching entry and walks the leaf chain backwards
-  - Why an ORDER BY that mixes ASC and DESC cannot be served by reading in either direction
-  - When ASC and DESC in a CREATE INDEX statement matter, and when they are unnecessary
-  - What NULLS FIRST and NULLS LAST mean, and which engines honour them in queries and in indexes
 recap:
   - The leaf chain is doubly linked, so one index serves ORDER BY col ASC and ORDER BY col DESC alike. The scan simply starts at the other end.
   - A mixed ORDER BY needs the index to be defined with the same mix of directions, or its exact mirror. Reading direction alone cannot produce it.
@@ -19,9 +11,9 @@ recap:
   - The standard only says NULLs sort together. SQL Server and MySQL have no NULLS FIRST/LAST; Oracle accepts it in queries but not in indexes; PostgreSQL accepts it in both.
 source: https://use-the-index-luke.com/sql/sorting-grouping/order-by-asc-desc-nulls-last
 ---
-import { Callout, KeyIdea, Figure, EngineTabs, Check, TryIt } from '@/components/mdx';
+import { Callout, KeyIdea, Figure, EngineTabs } from '@/components/mdx';
 
-The previous lesson treated order as if it had one direction. It has two, and an `ORDER BY` with several columns can mix them. The index does not care about the first case at all. The second case is the one situation where `ASC` and `DESC` in a `CREATE INDEX` statement change what the index can do.
+The previous page treated order as if it had one direction. It has two, and an `ORDER BY` with several columns can mix them. The index does not care about the first case at all. The second case is the one situation where `ASC` and `DESC` in a `CREATE INDEX` statement change what the index can do.
 
 ## 1. Reading an index backwards
 
@@ -245,38 +237,3 @@ The index stores its entries in one order, with the `NULL` entries at one end. A
 
 <Callout kind="warning" title="Common mistake">Creating a descending index "for the DESC queries". A single-column index, or a multi-column index whose columns all point the same way, already serves both directions. Reach for `DESC` in the index only when the `ORDER BY` mixes directions.</Callout>
 
-## 5. Try it yourself
-
-The playground starts with `sales_dt_pr` on `(sale_date, product_id)`, both ascending. SQLite reports a sort it could avoid for the leading column but not for the rest as `USE TEMP B-TREE FOR LAST TERM OF ORDER BY`.
-
-<TryIt id="6.2" setup={`CREATE INDEX sales_dt_pr ON sales (sale_date, product_id);`} tasks={[
-  { text: 'Run the query as given, both columns descending. The index is read backwards and there is no temp b-tree.', sql: 'sale_date\\s+desc\\s*,\\s*product_id\\s+desc', plan: '^(?![\\s\\S]*TEMP B-TREE)SEARCH sales USING INDEX sales_dt_pr' },
-  { text: 'Change the ORDER BY to <code>sale_date ASC, product_id DESC</code>. The plan now sorts the last term.', sql: 'sale_date\\s+asc\\s*,\\s*product_id\\s+desc', plan: 'TEMP B-TREE FOR LAST TERM OF ORDER BY' },
-  { text: 'Drop the index, recreate it as <code>(sale_date ASC, product_id DESC)</code>, and run the mixed query again. The sort is gone.', sql: 'create\\s+index[\\s\\S]*product_id\\s+desc\\s*\\)' },
-]} sql={`SELECT sale_date, product_id, quantity
-  FROM sales
- WHERE sale_date >= '2025-09-01'
- ORDER BY sale_date DESC, product_id DESC;`}>
-  <Fragment slot="hints">
-    <details class="hint"><summary>Hint for task 3</summary><div class="d">You can run several statements in one go. Separate them with semicolons and run the SELECT once more afterwards.</div></details>
-    <details class="hint"><summary>Show solution</summary><div class="d"><pre>DROP INDEX sales&#95;dt&#95;pr;
-CREATE INDEX sales&#95;dt&#95;pr ON sales (sale&#95;date ASC, product&#95;id DESC);
-SELECT sale&#95;date, product&#95;id, quantity
-  FROM sales
- WHERE sale&#95;date &gt;= '2025-09-01'
- ORDER BY sale&#95;date ASC, product&#95;id DESC;
--- plan: SEARCH sales USING INDEX sales&#95;dt&#95;pr (sale&#95;date&gt;?)</pre></div></details>
-  </Fragment>
-</TryIt>
-
-<Check
-  client:visible
-  question="The index is sales (sale_date, product_id), both ascending. Which ORDER BY still needs a sort operation?"
-  options={[
-    'ORDER BY sale_date DESC, product_id DESC',
-    'ORDER BY sale_date DESC, product_id ASC',
-    'ORDER BY sale_date ASC',
-  ]}
-  answer={1}
-  explain="Reading the index backwards yields both columns descending, so the first option is served. The third is the plain forward read. Only the mixed order has no reading direction that produces it, so that query sorts unless the index is defined as (sale_date DESC, product_id ASC) or its mirror image (sale_date ASC, product_id DESC)."
-/>

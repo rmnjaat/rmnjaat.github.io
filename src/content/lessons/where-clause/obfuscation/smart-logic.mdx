@@ -3,16 +3,7 @@ title: Smart Logic
 subtitle: One statement that covers every combination of optional filters by switching conditions off with NULL parameters is elegant to write and a full table scan to run. Send the database only the conditions that apply right now.
 chapter: where-clause
 order: 7.4
-kind: lesson
-minutes: 12
 summary: Why databases are built for dynamic SQL, why the pattern (col = :p OR :p IS NULL) forces a generic full-scan plan in databases with a shared plan cache, why inlining literals proves the point but is no fix, how dynamic SQL with bind parameters solves it, and what Db2, MySQL, Oracle, PostgreSQL and SQL Server do about bind values and plan caching.
-prereqs: "You should have read <a href='/sql/where-clause/bind-parameters/'>Parameterized Queries</a> and know why a cached plan has to work for every parameter value."
-outcomes:
-  - Why ad-hoc queries are something databases are good at
-  - What the smart logic pattern looks like and why it is one of the worst anti-patterns
-  - Why the plan is a full table scan even with an index on every column
-  - Why literal values would fix the plan and why that is not a solution
-  - How each database tries to cope, from REOPT to bind peeking to parameter sniffing
 recap:
   - The optimizer works at runtime, so databases are made for dynamic SQL. Use it when you need it.
   - With (col = :p OR :p IS NULL) for every filter, the cached plan has to cover the case where all filters are off, which is a full table scan.
@@ -21,7 +12,7 @@ recap:
   - Bind peeking, adaptive cursor sharing, parameter sniffing and REOPT exist to soften the problem and bring problems of their own. The reliable fix is to leave unnecessary filters out.
 source: https://use-the-index-luke.com/sql/where-clause/obfuscation/smart-logic
 ---
-import { Callout, KeyIdea, EngineTabs, Check, TryIt } from '@/components/mdx';
+import { Callout, KeyIdea, EngineTabs } from '@/components/mdx';
 
 A defining feature of SQL databases is that they accept any query at any time. The optimizer works at runtime: it analyses each statement when it arrives and produces a sensible plan on the spot. [Bind parameters](/sql/where-clause/bind-parameters/) keep the cost of that runtime optimization low. The short version: databases are built for dynamic SQL, so use it when you need it.
 
@@ -123,18 +114,18 @@ The problem is widespread, and every database with a shared plan cache has a fea
   Release 11g added adaptive cursor sharing, which can cache several plans for one statement. The optimizer peeks the bind values and stores their estimated selectivity next to the plan. A later execution reuses a cached plan only if its bind values fall inside that plan's selectivity range; otherwise a new plan is built and compared with the cached ones. If an equivalent plan exists, it is replaced by one that also covers the new selectivity estimates; if not, the new variant is cached alongside, with its estimates.
   </Fragment>
   <Fragment slot="postgresql">
-  PostgreSQL caches a plan only for a prepared statement, and only while that statement stays open, so the problem appears only when a statement handle is reused. Even then the server plans the first five executions with the real parameter values and switches to a generic plan only if that is not expected to cost more; since release 12, `plan_cache_mode` can force either behaviour. The JDBC driver adds a threshold of its own: it uses server-side prepared statements only from the fifth execution of a handle (`prepareThreshold`), and before that every execution is planned with its values anyway. See also the note on planning with actual bind values in the [bind parameters lesson](/sql/where-clause/bind-parameters/).
+  PostgreSQL caches a plan only for a prepared statement, and only while that statement stays open, so the problem appears only when a statement handle is reused. Even then the server plans the first five executions with the real parameter values and switches to a generic plan only if that is not expected to cost more; since release 12, `plan_cache_mode` can force either behaviour. The JDBC driver adds a threshold of its own: it uses server-side prepared statements only from the fifth execution of a handle (`prepareThreshold`), and before that every execution is planned with its values anyway. See also the note on planning with actual bind values in the [bind parameters page](/sql/where-clause/bind-parameters/).
   </Fragment>
   <Fragment slot="sql-server">
   SQL Server uses parameter sniffing: the actual bind values of the first execution are used during parsing. The same nondeterminism applies; the first execution shapes the plan, and the plan can change after a restart or when the cached plan expires.
 
-  Query hints give more control. `RECOMPILE` bypasses the plan cache for one statement; `OPTIMIZE FOR` supplies values to optimize for, used only for optimization; `USE PLAN` hands over an entire plan. All of them have accumulated edge cases and bugs that are beyond this lesson; Erland Sommarskog's articles on parameter sniffing track them release by release, SQL Server 2022 included.
+  Query hints give more control. `RECOMPILE` bypasses the plan cache for one statement; `OPTIMIZE FOR` supplies values to optimize for, used only for optimization; `USE PLAN` hands over an entire plan. All of them have accumulated edge cases and bugs that are beyond this page; Erland Sommarskog's articles on parameter sniffing track them release by release, SQL Server 2022 included.
   </Fragment>
 </EngineTabs>
 
 These heuristics can soften the smart logic problem to a degree, but they were built for a different purpose: the trouble that bind parameters cause with column histograms and `LIKE` expressions. The most reliable way to the best plan is to keep unnecessary filters out of the statement.
 
-The [bind parameters lesson](/sql/where-clause/bind-parameters/) covers the parameter side in detail. The section below shows how to assemble the where clause without giving up binding.
+The [bind parameters page](/sql/where-clause/bind-parameters/) covers the parameter side in detail. The section below shows how to assemble the where clause without giving up binding.
 
 ## 6. Building the statement with ORM tools
 
@@ -195,36 +186,3 @@ cmd.CommandText = "SELECT first_name, last_name, subsidiary_id, employee_id FROM
 
 In every variant the SQL text changes with the set of filters, and the values never enter it.
 
-## 7. Try it
-
-The playground has an index on `UPPER(last_name)` and one on `subsidiary_id`. The first query is the smart logic form; SQLite treats the unbound `?` placeholders as NULL, so all filters are off and the plan is a scan.
-
-<TryIt id="2.7.4" tasks={[
-  { text: 'Run the smart logic query. The plan is <code>SCAN employees</code> and all 1,000 rows come back.', sql: '\\?\\s+is\\s+null', plan: '^SCAN employees' },
-  { text: 'Replace the parameters with literals: <code>NULL</code> for the first two and <code>\'WINAND\'</code> for the name. SQLite does not fold <code>\'WINAND\' IS NULL</code> away, so the plan stays a scan here, unlike Oracle.', sql: "'WINAND'\\s+is\\s+null", plan: '^SCAN employees' },
-  { text: 'Write the statement dynamic SQL would produce: <code>WHERE UPPER(last_name) = \'WINAND\'</code> and nothing else. The plan uses <code>emp_up_name</code>.', sql: "^\\s*select[\\s\\S]*where\\s+upper\\(last_name\\)\\s*=\\s*'WINAND'\\s*;?\\s*$", plan: 'USING INDEX emp_up_name \\(<expr>=\\?\\)' },
-]} setup={`CREATE INDEX emp_up_name ON employees (UPPER(last_name)); CREATE INDEX emp_sub ON employees (subsidiary_id); ANALYZE;`} sql={`SELECT first_name, last_name, subsidiary_id, employee_id
-  FROM employees
- WHERE ( subsidiary_id    = ? OR ? IS NULL )
-   AND ( employee_id      = ? OR ? IS NULL )
-   AND ( UPPER(last_name) = ? OR ? IS NULL );`}>
-  <Fragment slot="hints">
-    <details class="hint"><summary>Hint for task 3</summary><div class="d">Only the filters the user filled in belong in the statement. One filter, one condition, one index.</div></details>
-    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT first&#95;name, last&#95;name, subsidiary&#95;id, employee&#95;id
-  FROM employees
- WHERE UPPER(last&#95;name) = 'WINAND';
--- plan: SEARCH employees USING INDEX emp&#95;up&#95;name (&lt;expr&gt;=?)</pre></div></details>
-  </Fragment>
-</TryIt>
-
-<Check
-  client:visible
-  question="Why does WHERE (subsidiary_id = :sub_id OR :sub_id IS NULL) end up as a full table scan in Oracle even when :sub_id is supplied?"
-  options={[
-    'OR conditions can never use an index.',
-    'The cached plan is built before the value is known and must also work when :sub_id is NULL, which requires reading every row.',
-    'IS NULL conditions disable indexes in every database.',
-  ]}
-  answer={1}
-  explain="A shared plan is reused for every execution, so it has to be valid for all parameter values. When :sub_id is NULL every row qualifies, and only a full scan produces them. That plan is then used for selective searches too. Generating the statement from the supplied filters gives each case a plan of its own."
-/>

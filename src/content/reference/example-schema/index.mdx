@@ -1,6 +1,6 @@
 ---
 title: Example Schema
-subtitle: Two tables, employees and sales, with deliberately uneven data. Every query in the book and every playground runs against them.
+subtitle: Two tables, employees and sales, with deliberately uneven data. Every query in the book runs against them.
 section: example-schema
 order: 0
 summary: The employees and sales tables used in every example, their columns, keys and row counts, why the data is skewed on purpose, the DDL for SQLite, PostgreSQL, MySQL, Oracle, SQL Server and Db2, how to load the data on a server, and how the book's own, larger scripts differ.
@@ -8,13 +8,13 @@ source: https://use-the-index-luke.com/sql/example-schema
 ---
 import { Callout, EngineTabs } from '@/components/mdx';
 
-The book uses one small schema throughout, so that a plan or a timing from one chapter can be compared with the next. It is a company with three subsidiaries, a thousand employees, and twenty thousand sales. The playground on every lesson loads exactly this schema, from the same `schema.sql` file, into a SQLite database in your browser.
+The book uses one small schema throughout, so that a plan or a timing from one chapter can be compared with the next. It is a company with three subsidiaries, a thousand employees, and twenty thousand sales.
 
-The tables have the same names and columns as in the original book, but the data does not. The original scripts build 10,000 employees in 30 subsidiaries and generate sales for a subset of them, over a million rows in some chapters, because they are meant to be run on a server and to make slow plans visibly slow. This site keeps the volume small enough to run in a browser tab. Row counts quoted in lessons refer to the data described here; the [last section](#the-books-own-scripts) describes the original volumes so that you can relate them.
+The tables have the same names and columns as in the original book, but the data does not. The original scripts build 10,000 employees in 30 subsidiaries and generate sales for a subset of them, over a million rows in some chapters, because they are meant to be run on a server and to make slow plans visibly slow. This site keeps the volume small enough to run in a browser tab. Row counts quoted in pages refer to the data described here; the [last section](#the-books-own-scripts) describes the original volumes so that you can relate them.
 
 ## employees
 
-One row per employee. The primary key has two columns, because employee numbers are assigned per subsidiary and only the combination is unique. That is a deliberate complication: it makes the primary key a concatenated index, and several lessons in [Unit 2 (the where clause)](/sql/where-clause/) depend on it.
+One row per employee. The primary key has two columns, because employee numbers are assigned per subsidiary and only the combination is unique. That is a deliberate complication: it makes the primary key a concatenated index, and several pages in [Chapter 2 (the where clause)](/sql/where-clause/) depend on it.
 
 | Column | Type | Description |
 | --- | --- | --- |
@@ -51,19 +51,18 @@ One row per sale, twenty per employee. The `employee_id` and `subsidiary_id` col
 
 Primary key: `(sale_id)`. No other index. 20,000 rows. Because each employee has the same number of sales, the sales follow the same split as the employees: 10,000 rows for subsidiary 20, 6,000 for subsidiary 10 and 4,000 for subsidiary 30.
 
-The SQLite version declares no foreign key, which keeps the browser database simple. The DDL for the server engines below declares `sales (employee_id, subsidiary_id)` as a foreign key to `employees`, which is how the [delete lesson](/sql/dml/delete/) expects it.
+The SQLite version declares no foreign key, which keeps the browser database simple. The DDL for the server engines below declares `sales (employee_id, subsidiary_id)` as a foreign key to `employees`, which is how the [delete page](/sql/dml/delete/) expects it.
 
 ## Why the data is skewed
 
-Real tables are never uniform, and the skew is where indexing gets interesting. A condition on `subsidiary_id = 30` matches a fifth of the employees; the same condition with 20 matches half. An index on `subsidiary_id` alone is a reasonable choice for one value and a poor one for the other, and the optimizer can only tell the difference if it knows the distribution and knows the value. That is the whole discussion of selectivity, statistics and bind parameters in [Unit 2 (the where clause)](/sql/where-clause/), and it needs data where the answer depends on the value.
+Real tables are never uniform, and the skew is where indexing gets interesting. A condition on `subsidiary_id = 30` matches a fifth of the employees; the same condition with 20 matches half. An index on `subsidiary_id` alone is a reasonable choice for one value and a poor one for the other, and the optimizer can only tell the difference if it knows the distribution and knows the value. That is the whole discussion of selectivity, statistics and bind parameters in [Chapter 2 (the where clause)](/sql/where-clause/), and it needs data where the answer depends on the value.
 
-The dates are skewed the other way, almost flat: every day has about the same number of sales. That makes `sale_date` a good column for range conditions and for the [sorting](/sql/sorting-grouping/) and [paging](/sql/partial-results/) units, where the question is the order of the entries rather than how many match.
+The dates are skewed the other way, almost flat: every day has about the same number of sales. That makes `sale_date` a good column for range conditions and for the [sorting](/sql/sorting-grouping/) and [paging](/sql/partial-results/) chapters, where the question is the order of the entries rather than how many match.
 
-<Callout kind="note">The playground runs `ANALYZE` after loading, so SQLite's planner has statistics for both tables. Plans you see there reflect the real distribution, not a guess.</Callout>
 
 ## DDL
 
-The schema as the playground loads it. SQLite stores dates as ISO text, which sorts and compares correctly, and `INTEGER PRIMARY KEY` on `sales` makes `sale_id` an alias for the row id. The insert statements that generate the data are in `public/schema.sql`.
+The schema in SQLite form. SQLite stores dates as ISO text, which sorts and compares correctly, and `INTEGER PRIMARY KEY` on `sales` makes `sale_id` an alias for the row id. The data generator is shown below, under MySQL and SQLite.
 
 ```sql
 CREATE TABLE employees (
@@ -194,7 +193,7 @@ The same tables with native types and a foreign key, for running the examples on
   );
   ```
 
-  SQL Server makes the primary key index clustered unless told otherwise. The book's scripts declare it `PRIMARY KEY NONCLUSTERED` so that the table stays a heap and the plans look like those of the other engines; the [index-organized table lesson](/sql/clustering/index-organized-clustered-index/) explains what changes when you leave the default.
+  SQL Server makes the primary key index clustered unless told otherwise. The book's scripts declare it `PRIMARY KEY NONCLUSTERED` so that the table stays a heap and the plans look like those of the other engines; the [index-organized table page](/sql/clustering/index-organized-clustered-index/) explains what changes when you leave the default.
   </Fragment>
   <Fragment slot="db2">
   ```sql
@@ -224,14 +223,14 @@ The same tables with native types and a foreign key, for running the examples on
   </Fragment>
 </EngineTabs>
 
-A primary key creates an index in every one of these engines. The foreign key does not, so after loading data on a server, add an index on the foreign key columns, which the [delete lesson's](/sql/dml/delete/) warning about cascading deletes assumes; the `sales_emp (subsidiary_id, employee_id)` index the join unit creates serves. The playground does not have it unless a lesson's setup creates it.
+A primary key creates an index in every one of these engines. The foreign key does not, so after loading data on a server, add an index on the foreign key columns, which the [delete page's](/sql/dml/delete/) warning about cascading deletes assumes; the `sales_emp (subsidiary_id, employee_id)` index the join chapter creates serves.
 
 ## Loading the data on a server
 
-The data generator in `public/schema.sql` is written for SQLite. The quickest way to get the identical rows into another engine is to let SQLite write them out as plain `INSERT` statements, which every engine accepts.
+The SQLite generator below is the shortest. The quickest way to get the identical rows into another engine is to let SQLite write them out as plain `INSERT` statements, which every engine accepts.
 
 ```
-sqlite3 :memory: ".read public/schema.sql" ".mode insert employees" "SELECT * FROM employees" \
+sqlite3 :memory: ".read schema.sql" ".mode insert employees" "SELECT * FROM employees" \
   ".mode insert sales" "SELECT * FROM sales" > data.sql
 ```
 
@@ -291,7 +290,7 @@ If you would rather generate rows in the database, as the book's own scripts do,
   SELECT i, ... FROM n;
   ```
 
-  This is the form `public/schema.sql` uses, with `CASE` expressions on `i` instead of random values so that every playground gets the same rows. The book's SQLite scripts use the same chain of generator views as the MySQL ones, because they predate recursive CTEs in SQLite.
+  This form, with `CASE` expressions on `i` instead of random values, gives every load the same rows. The book's SQLite scripts use the same chain of generator views as the MySQL ones, because they predate recursive CTEs in SQLite.
   </Fragment>
 </EngineTabs>
 
@@ -314,13 +313,13 @@ The original appendix is not one schema file but a set of ready-to-run scripts, 
 
 What those scripts build, in the order the book uses it:
 
-- **employees**, first with 1,000 rows and a single-column primary key, for the surrogate key lesson. The columns are the ones above plus a `junk` column (`CHAR(1000)` in most engines, `CHAR(255)` in MySQL and SQLite, `CHAR(254)` in Db2 and SQLBase) that pads each row to a realistic size, and `date_of_birth` is nullable. Employee 123 is updated to the author's name so that the lessons have a row to search for. For the concatenated key lesson a `subsidiary_id` column is added, the existing rows are assigned to subsidiary 30, 9,000 more rows are spread over subsidiaries 1 to 29, and the primary key is rebuilt as `(employee_id, subsidiary_id)` and later as `(subsidiary_id, employee_id)`. The reordering steps differ per engine: PostgreSQL and SQL Server swap in a temporary unique index so the table is never without a key, Oracle 11g needs a dummy third column because two indexes on the same columns are not allowed before 12c, Db2 needs a `REORG TABLE` between dropping and re-adding the key, and SQLite has to drop and recreate the table.
+- **employees**, first with 1,000 rows and a single-column primary key, for the surrogate key page. The columns are the ones above plus a `junk` column (`CHAR(1000)` in most engines, `CHAR(255)` in MySQL and SQLite, `CHAR(254)` in Db2 and SQLBase) that pads each row to a realistic size, and `date_of_birth` is nullable. Employee 123 is updated to the author's name so that the pages have a row to search for. For the concatenated key page a `subsidiary_id` column is added, the existing rows are assigned to subsidiary 30, 9,000 more rows are spread over subsidiaries 1 to 29, and the primary key is rebuilt as `(employee_id, subsidiary_id)` and later as `(subsidiary_id, employee_id)`. The reordering steps differ per engine: PostgreSQL and SQL Server swap in a temporary unique index so the table is never without a key, Oracle 11g needs a dummy third column because two indexes on the same columns are not allowed before 12c, Db2 needs a `REORG TABLE` between dropping and re-adding the key, and SQLite has to drop and recreate the table.
 - **sales**, generated from `employees` for roughly one employee in seven (`MOD(employee_id, 7) = 4`), with about `employee_id / 5` sales each over the last ten years, Sundays removed, and a `junk CHAR(200)` column. In PostgreSQL that comes to about 1.2 million rows. The foreign key references `(subsidiary_id, employee_id)`.
 - **scale_data** for the scalability chapter: columns `section`, `id1`, `id2`, with 3,000 rows per section number, so that 300 sections hold about 135 million rows. Two indexes, `scale_slow (section, id1, id2)` and `scale_fast (section, id2, id1)`, and the table is physically clustered on each in turn. The same table serves the top-N and paging experiments of the partial results chapter.
 - **scale_write_0** to **scale_write_5** for the DML chapter: six copies of a 10-million-row table with five numeric columns, carrying zero to five indexes, and a `test_write_scalability` procedure that times single-row inserts, updates and deletes against each.
-- **messages** for the partial index lesson: about a million rows of which a small share (1 percent in PostgreSQL, 9 percent in the Db2 variant) are unprocessed, to compare a full index with a partial one. The Db2 version emulates the partial index with a `CASE` expression and `EXCLUDE NULL KEYS`, and shows the `+0` trick needed to make the optimizer match it.
+- **messages** for the partial index page: about a million rows of which a small share (1 percent in PostgreSQL, 9 percent in the Db2 variant) are unprocessed, to compare a full index with a partial one. The Db2 version emulates the partial index with a `CASE` expression and `EXCLUDE NULL KEYS`, and shows the `+0` trick needed to make the optimizer match it.
 - **sales_iot** in Oracle: the `sales` table rebuilt as an index-organized table with a secondary index on `sale_date`, for the clustering chapter.
 - **tbl** for the 3-minute quiz: a few hundred rows with columns `date_column`, `a`, `b` and `text`, and the indexes the five quiz questions ask about.
 - Function-based index demonstrations: an index on `UPPER(last_name)` (with `varchar_pattern_ops` in PostgreSQL), and a `get_age` function that every engine refuses to index because it is not deterministic (PostgreSQL: must be `IMMUTABLE`; Db2: SQL0356N; SQLite: non-deterministic use of `strftime`).
 
-The experiments in this site's lessons reproduce these effects at playground scale. Where a lesson quotes a figure from the original, such as the hundredfold difference of the scalability chapter, it says so and names the data volume it was measured on.
+The experiments in this site's pages reproduce these effects at a small scale. Where a page quotes a figure from the original, such as the hundredfold difference of the scalability chapter, it says so and names the data volume it was measured on.

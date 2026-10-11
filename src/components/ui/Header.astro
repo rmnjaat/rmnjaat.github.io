@@ -1,14 +1,14 @@
 ---
 import PagefindConfig from 'astro-pagefind/components/PagefindConfig.astro';
-import { engines, siteName } from '../../lib/site';
+import { siteName } from '../../lib/site';
 interface Props { current?: string }
 const { current } = Astro.props;
 const nav = [
-  { key: 'course', href: '/', label: 'Course' },
-  { key: 'practice', href: '/practice/', label: 'Practice' },
-  { key: 'playground', href: '/playground/', label: 'Playground' },
+  { key: 'contents', href: '/sql/', label: 'Contents' },
   { key: 'plans', href: '/sql/explain-plan/', label: 'Execution plans' },
-  { key: 'glossary', href: '/sql/glossary/', label: 'Glossary' },
+  { key: 'myths', href: '/sql/myth-directory/', label: 'Myths' },
+  { key: 'schema', href: '/sql/example-schema/', label: 'Example schema' },
+  { key: 'about', href: '/sql/about/', label: 'About' },
 ];
 ---
 <header class="site-header">
@@ -18,44 +18,25 @@ const nav = [
       {nav.map((n) => <a href={n.href} aria-current={current === n.key ? 'page' : undefined}>{n.label}</a>)}
     </nav>
     <div class="site-tools">
-      <span class="prog" id="course-prog" title="Course progress">Progress <span class="bar"><i id="course-prog-bar"></i></span> <span id="course-prog-pct">0%</span></span>
       <button class="tool-btn" type="button" id="search-open" aria-label="Search">
         <svg width="15" height="15" viewBox="0 0 15 15" aria-hidden="true"><circle cx="6.5" cy="6.5" r="4.75" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 10l3.5 3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
         <span>Search</span>
       </button>
-      <label class="sr-only" for="engine-select">Your database</label>
-      <select class="tool-btn engine-select" id="engine-select" title="Your database. Examples and plans show this engine first.">
-        {engines.map((e) => <option value={e.id}>{e.label}</option>)}
-      </select>
     </div>
   </div>
-  <dialog class="search" id="search-dialog" aria-label="Search the course">
+  <dialog class="search" id="search-dialog" aria-label="Search the site">
     <div class="inner">
       <div class="search-row">
-        <pagefind-input instance="site" placeholder="Search lessons, plans, glossary" autofocus></pagefind-input>
+        <pagefind-input instance="site" placeholder="Search all pages" autofocus></pagefind-input>
         <button class="btn small" type="button" id="search-close">Close</button>
       </div>
-      <pagefind-summary instance="site" default-message="Type to search every lesson and reference page."></pagefind-summary>
+      <pagefind-summary instance="site" default-message="Type to search every page."></pagefind-summary>
       <pagefind-results instance="site" max-results="40" hide-sub-results></pagefind-results>
     </div>
   </dialog>
   <PagefindConfig instance="site" excerpt-length="24" />
 </header>
 <script>
-  import { getEngine, setEngine, courseProgress } from '../../lib/prefs';
-  const sel = document.getElementById('engine-select') as HTMLSelectElement | null;
-  if (sel) {
-    sel.value = getEngine();
-    sel.addEventListener('change', () => setEngine(sel.value));
-    window.addEventListener('util:engine', (ev) => { sel.value = (ev as CustomEvent<string>).detail; });
-  }
-  const paint = () => {
-    const total = Number(document.body.dataset.totalItems || 0);
-    const { pct } = courseProgress(total);
-    const bar = document.getElementById('course-prog-bar'); const t = document.getElementById('course-prog-pct');
-    if (bar) bar.style.width = pct + '%'; if (t) t.textContent = pct + '%';
-  };
-  paint(); window.addEventListener('util:done', paint);
   const dlg = document.getElementById('search-dialog') as HTMLDialogElement | null;
   const open = () => { if (!dlg) return; dlg.showModal(); const pi = dlg.querySelector('pagefind-input') as HTMLElement | null; (pi?.shadowRoot?.querySelector('input') as HTMLInputElement | null)?.focus(); };
   document.getElementById('search-open')?.addEventListener('click', open);

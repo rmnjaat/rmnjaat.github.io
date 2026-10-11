@@ -3,16 +3,7 @@ title: Partial Indexes
 subtitle: An index does not have to cover every row. Give it a where clause of its own and it holds only the rows a query will ever ask for.
 chapter: where-clause
 order: 5
-kind: lesson
-minutes: 7
 summary: How a partial index (PostgreSQL) or filtered index (SQL Server) limits the indexed rows with a where clause, why that shrinks the index in two dimensions, what the index predicate may contain, and how Oracle and Db2 get the same effect by other means.
-prereqs: "You should know how a <a href='/sql/where-clause/the-equals-operator/concatenated-keys/'>concatenated index</a> works and why a smaller index is a faster index."
-outcomes:
-  - What a partial or filtered index is and how to define one
-  - Why a queue table is the textbook case for it
-  - How the index shrinks vertically and horizontally
-  - What the index where clause may and may not contain
-  - When a query can use a partial index
 recap:
   - A partial index has its own where clause and contains only the rows that satisfy it.
   - A column that is constant inside the index can be dropped from it, so the index shrinks in rows and in width.
@@ -21,11 +12,11 @@ recap:
   - The database can use the index whenever the query's where clause contains the index condition.
 source: https://use-the-index-luke.com/sql/where-clause/partial-and-filtered-indexes
 ---
-import { Callout, KeyIdea, Figure, EngineTabs, Check, TryIt } from '@/components/mdx';
+import { Callout, KeyIdea, Figure, EngineTabs } from '@/components/mdx';
 
 Until now every decision was about which columns go into an index. Partial indexes, as PostgreSQL calls them, or filtered indexes in SQL Server terms, add a second decision: which rows go in.
 
-<Callout kind="warning" title="Oracle and Db2">Oracle has no where clause on `CREATE INDEX`; since 12c it can leave whole partitions out of an index, and for conditions on individual rows the [NULL group](/sql/where-clause/null/partial-index/) explains its own route, building on this lesson. Db2 (LUW) has no partial indexes either, but they can be [emulated the Oracle way](/sql/where-clause/null/partial-index/) with the `EXCLUDE NULL KEYS` feature.</Callout>
+<Callout kind="warning" title="Oracle and Db2">Oracle has no where clause on `CREATE INDEX`; since 12c it can leave whole partitions out of an index, and for conditions on individual rows the [NULL group](/sql/where-clause/null/partial-index/) explains its own route, building on this page. Db2 (LUW) has no partial indexes either, but they can be [emulated the Oracle way](/sql/where-clause/null/partial-index/) with the `EXCLUDE NULL KEYS` feature.</Callout>
 
 ## 1. The queue query
 
@@ -111,39 +102,3 @@ The optimizer may pick a partial index only when the query's where clause lets i
 
 <Callout kind="warning" title="Common mistake">Leaving the index condition out of the query because "the index only has those rows anyway". The optimizer has to prove at planning time that every row the query wants is in the index. If the query does not say `processed = 'N'`, it also wants processed messages, and the partial index cannot be used.</Callout>
 
-## 4. Try it
-
-The playground builds a small `messages` table with 20,000 rows, 200 of them unprocessed, and the partial index from above.
-
-<TryIt id="2.5.1" tasks={[
-  { text: 'Run the queue query. The plan uses <code>messages_todo</code> with <code>receiver</code> as the access predicate.', sql: "processed\\s*=\\s*'N'\\s+and\\s+receiver", plan: 'USING INDEX messages_todo \\(receiver=\\?\\)' },
-  { text: 'Remove the <code>processed = \'N\'</code> condition and run again. The plan falls back to <code>SCAN messages</code>: the query now wants rows the index does not have.', sql: '^\\s*select\\s+message\\s+from\\s+messages\\s+where\\s+receiver\\s*=\\s*\\d+\\s*;?\\s*$', plan: '^SCAN messages' },
-  { text: 'Think about it: what is peculiar about the smallest possible index for <code>WHERE processed = \'N\'</code> alone? Create it and run that query.', sql: "create\\s+index[\\s\\S]*where\\s+processed\\s*=\\s*'N'" },
-]} setup={`CREATE TABLE messages (message_id INTEGER PRIMARY KEY, receiver INTEGER NOT NULL, processed TEXT NOT NULL, message TEXT NOT NULL);
-WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000)
-INSERT INTO messages SELECT i, (i % 97) + 1, CASE WHEN i % 100 = 0 THEN 'N' ELSE 'Y' END, 'message ' || i FROM n;
-CREATE INDEX messages_todo ON messages (receiver) WHERE processed = 'N';
-ANALYZE;`} sql={`SELECT message
-  FROM messages
- WHERE processed = 'N'
-   AND receiver  = 42;`}>
-  <Fragment slot="hints">
-    <details class="hint"><summary>Hint for task 3</summary><div class="d">Every entry in that index has the same key value. The index is really just a list of row pointers, and the key column exists only because the syntax demands one.</div></details>
-    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX messages&#95;todo&#95;all ON messages (processed) WHERE processed = 'N';
-SELECT message FROM messages WHERE processed = 'N';
--- plan: SEARCH messages USING INDEX messages&#95;todo&#95;all (processed=?)
--- every key is 'N'; the index is a list of rowids with one constant key.</pre></div></details>
-  </Fragment>
-</TryIt>
-
-<Check
-  client:visible
-  question="A partial index is defined ON messages (receiver) WHERE processed = 'N'. Which query can use it?"
-  options={[
-    "WHERE processed = 'N' AND receiver = 42",
-    "WHERE receiver = 42, because the unprocessed rows are in the index anyway",
-    "WHERE processed = 'Y' AND receiver = 42",
-  ]}
-  answer={0}
-  explain="The index contains only rows with processed = 'N'. A query that repeats that condition can be answered from the index. A query without it, or with a different value, also wants rows that are not in the index, so the optimizer cannot use it."
-/>

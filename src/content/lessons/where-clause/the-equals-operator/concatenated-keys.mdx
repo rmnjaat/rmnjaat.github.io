@@ -3,16 +3,7 @@ title: Concatenated Keys
 subtitle: An index on two columns is sorted by the first one. Put the columns in the wrong order and half of your queries cannot use it.
 chapter: where-clause
 order: 1.2
-kind: lesson
-minutes: 11
 summary: Why a concatenated index only serves queries that cover its leading columns, how a merger turns a working primary key into a full table scan, why reversing the column order fixes it, and why one well-ordered index beats two.
-prereqs: "You should have read <a href='/sql/where-clause/the-equals-operator/primary-keys/'>Primary Keys</a> and be able to find the index name and the access condition in an execution plan."
-outcomes:
-  - How the entries of a multi-column index are sorted
-  - Why a query on the second column alone cannot use the index
-  - When a full table scan is the right choice and when it is a trap
-  - How to pick the column order so that one index serves several queries
-  - Why developers, not consultants or DBAs, are best placed to choose it
 recap:
   - A concatenated index is one B-tree over several columns. It is sorted by the first column; later columns only order the entries that agree on the earlier ones.
   - The index is usable when the where clause covers its leading columns. Any prefix works; a query on a trailing column alone does not.
@@ -21,7 +12,7 @@ recap:
   - Choosing the order needs knowledge of the application's where clauses. That knowledge lives with developers.
 source: https://use-the-index-luke.com/sql/where-clause/the-equals-operator/concatenated-keys
 ---
-import { Callout, KeyIdea, EngineTabs, Check, TryIt, ConcatIndex } from '@/components/mdx';
+import { Callout, KeyIdea, EngineTabs, ConcatIndex } from '@/components/mdx';
 
 The database creates the primary key index on its own, but when the key spans several columns there is still a decision to make. The index then covers all key columns at once: a **concatenated index**, also called a multi-column, composite or combined index. The order of its columns decides which queries can use it, and the database will not choose that order for you.
 
@@ -184,7 +175,7 @@ In general a concatenated index can be used when the where clause covers its lea
 
 <KeyIdea>Any prefix of the index columns works. A column in the middle or at the end, on its own, does not.</KeyIdea>
 
-The two-index alternative would also have given good select performance. The single index is still the better choice. It needs no extra storage and no extra maintenance, and that maintenance is paid on every write: the fewer indexes a table carries, the faster its inserts, deletes and updates run. [Unit 8](/sql/dml/) puts numbers on that cost.
+The two-index alternative would also have given good select performance. The single index is still the better choice. It needs no extra storage and no extra maintenance, and that maintenance is paid on every write: the fewer indexes a table carries, the faster its inserts, deletes and updates run. [Chapter 8](/sql/dml/) puts numbers on that cost.
 
 <Callout kind="warning" title="Common mistake">Expecting the optimizer to rearrange the index. The sort order is fixed when the index is built. The order of conditions in the `WHERE` clause does not matter; the order of columns in the index definition is everything.</Callout>
 
@@ -194,35 +185,3 @@ Defining the best index takes more than knowing how indexes work. It takes knowi
 
 That is why an external consultant struggles with it. They see one query at a time and have no overview of the application's access paths, so they cannot weigh what an index would do for the other queries. Database administrators are in a similar spot: they know the schema, but not how the code uses it. The one place where database knowledge and knowledge of the business domain meet is the development team. Developers have a feel for the data and know the access paths, and they can get the column order right for the whole application without much effort.
 
-## 7. Try it
-
-The playground table has its primary key on `(employee_id, subsidiary_id)`, the merger order. SQLite cannot reorder a primary key in place, so you will add a second index with the columns the other way round to stand in for the reversed key.
-
-<TryIt id="2.2" tasks={[
-  { text: 'Run the subsidiary query as it is. The plan says <code>SCAN employees</code>: no index.', sql: 'subsidiary_id\\s*=\\s*20', plan: '^SCAN employees' },
-  { text: 'Create an index <code>emp_sub_id</code> on <code>(subsidiary_id, employee_id)</code>.', sql: 'create\\s+index\\s+emp_sub_id\\s+on\\s+employees\\s*\\(\\s*subsidiary_id\\s*,\\s*employee_id\\s*\\)' },
-  { text: 'Run the same query again. It now reads <code>SEARCH employees USING INDEX emp_sub_id (subsidiary_id=?)</code>.', sql: 'subsidiary_id\\s*=\\s*20', plan: 'USING INDEX emp_sub_id \\(subsidiary_id=\\?\\)' },
-]} sql={`SELECT first_name, last_name
-  FROM employees
- WHERE subsidiary_id = 20;`}>
-  <Fragment slot="hints">
-    <details class="hint"><summary>Hint for task 2</summary><div class="d">Run the <code>CREATE INDEX</code> statement on its own first, then put the query back and run it again. The playground keeps the index until you reload the page.</div></details>
-    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX emp&#95;sub&#95;id ON employees (subsidiary&#95;id, employee&#95;id);
-SELECT first&#95;name, last&#95;name FROM employees WHERE subsidiary&#95;id = 20;
--- plan: SEARCH employees USING INDEX emp&#95;sub&#95;id (subsidiary&#95;id=?)</pre></div></details>
-  </Fragment>
-</TryIt>
-
-Afterwards, change the condition to `employee_id = 123`. The new index is useless for it, but the primary key index still covers that prefix, so the plan is still a `SEARCH`.
-
-<Check
-  client:visible
-  question="Two queries run against employees: one filters on employee_id and subsidiary_id, the other on subsidiary_id alone. Which single index serves both?"
-  options={[
-    '(employee_id, subsidiary_id)',
-    '(subsidiary_id, employee_id)',
-    'Either. The optimizer rearranges the columns as needed.',
-  ]}
-  answer={1}
-  explain="An index is usable when the where clause covers its leading columns. Both queries cover subsidiary_id, so it must come first. The full-key query covers both columns and works with either order. The optimizer cannot rearrange an index; the sort order is fixed when the index is built."
-/>

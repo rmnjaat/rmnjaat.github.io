@@ -26,7 +26,7 @@ The same trick works without a second real column. Any constant that is never nu
 CREATE INDEX emp_dob ON employees (date_of_birth, 'X');
 ```
 
-The literal `'X'` is stored in every entry, so every row has one, and the index now supports `IS NULL` on `date_of_birth`. The constant costs a few bytes per entry. The [NULL in indexes lesson](/sql/where-clause/null/index/) covers this as part of indexing null, the [NOT NULL constraints lesson](/sql/where-clause/null/not-null-constraint/) explains why the optimizer needs the constraint, and the [partial index lesson](/sql/where-clause/null/partial-index/) uses the opposite trick: leaving rows out on purpose to build a small index on the few rows that have a value.
+The literal `'X'` is stored in every entry, so every row has one, and the index now supports `IS NULL` on `date_of_birth`. The constant costs a few bytes per entry. The [NULL in indexes page](/sql/where-clause/null/index/) covers this as part of indexing null, the [NOT NULL constraints page](/sql/where-clause/null/not-null-constraint/) explains why the optimizer needs the constraint, and the [partial index page](/sql/where-clause/null/partial-index/) uses the opposite trick: leaving rows out on purpose to build a small index on the few rows that have a value.
 
 ## What to do instead
 

@@ -3,16 +3,7 @@ title: Greater, Less and BETWEEN
 subtitle: An index range scan is cheap when the scanned range is short. With a range condition in the where clause, the column order of the index decides how short it is.
 chapter: where-clause
 order: 4.1
-kind: lesson
-minutes: 10
 summary: Where an index range scan starts and stops, why columns compared with equals belong before the column with the range condition, how to tell access predicates from filter predicates in Db2, Oracle, PostgreSQL and SQL Server plans, and why BETWEEN includes its boundaries.
-prereqs: "You should have read <a href='/sql/where-clause/the-equals-operator/concatenated-keys/'>Concatenated Keys</a> and know that a multi-column index is sorted by its first column, then its second."
-outcomes:
-  - How to find where an index scan starts and where it ends
-  - Why the equality column goes first and the range column last
-  - Why the most-selective-first rule does not help here
-  - How Db2, Oracle, PostgreSQL and SQL Server show access and filter predicates
-  - What BETWEEN means at the boundaries
 recap:
   - The leaf node traversal is the biggest risk of an index range scan, so keep the scanned range as small as possible.
   - An access predicate tells the scan where to start and where to stop. A filter predicate is only checked on the entries the scan reads anyway, so it does not shorten the walk.
@@ -21,7 +12,7 @@ recap:
   - BETWEEN includes both boundary values, like a pair of >= and <= conditions.
 source: https://use-the-index-luke.com/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates
 ---
-import { Callout, KeyIdea, Figure, EngineTabs, Check, TryIt, IndexAccess } from '@/components/mdx';
+import { Callout, KeyIdea, Figure, EngineTabs, IndexAccess } from '@/components/mdx';
 
 The expensive part of an index range scan is not the tree. It is the walk along the leaf nodes that follows it, and the table rows that walk points to. The first rule of indexing is therefore to keep that walk short. You can check it for any query by asking two questions: where does the scan start, and where does it stop?
 
@@ -293,40 +284,3 @@ AND DATE_OF_BIRTH <= '10-JAN-71'
 
 To the index the two spellings are the same: one start condition and one stop condition.
 
-## 6. Try it
-
-The playground has an index on `(date_of_birth, subsidiary_id)`, the wrong order for this query. SQLite lists only the conditions it uses as scan boundaries, so `subsidiary_id` does not appear in the plan at all even though the column is in the index. That absence is the filter predicate.
-
-<TryIt id="2.4.1" tasks={[
-  { text: 'Run the query as given. The plan should show only <code>date_of_birth</code> bounds: <code>(date_of_birth&gt;? AND date_of_birth&lt;?)</code>.', sql: 'subsidiary_id\\s*=\\s*20', plan: 'emp_dob_sub \\(date_of_birth>\\? AND date_of_birth<\\?\\)' },
-  { text: 'Create a second index <code>emp_sub_dob</code> on <code>(subsidiary_id, date_of_birth)</code>.', sql: 'create\\s+index\\s+emp_sub_dob' },
-  { text: 'Run the query again. Now all three conditions bound the scan: <code>(subsidiary_id=? AND date_of_birth&gt;? AND date_of_birth&lt;?)</code>.', sql: 'subsidiary_id\\s*=\\s*20', plan: 'subsidiary_id=\\? AND date_of_birth>\\? AND date_of_birth<\\?' },
-]} setup={`CREATE INDEX emp_dob_sub ON employees (date_of_birth, subsidiary_id); ANALYZE;`} sql={`SELECT first_name, last_name, date_of_birth
-  FROM employees
- WHERE date_of_birth >= '1971-01-01'
-   AND date_of_birth <= '1971-12-31'
-   AND subsidiary_id  = 20;`}>
-  <Fragment slot="hints">
-    <details class="hint"><summary>Hint for task 1</summary><div class="d">Thirty employees were born in 1971; fifteen of them are in subsidiary 20. With the date column first, the scan reads all thirty entries and discards half.</div></details>
-    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX emp&#95;sub&#95;dob ON employees (subsidiary&#95;id, date&#95;of&#95;birth);
-SELECT first&#95;name, last&#95;name, date&#95;of&#95;birth
-  FROM employees
- WHERE date&#95;of&#95;birth &gt;= '1971-01-01'
-   AND date&#95;of&#95;birth &lt;= '1971-12-31'
-   AND subsidiary&#95;id  = 20;
--- plan: SEARCH employees USING INDEX emp&#95;sub&#95;dob
---       (subsidiary&#95;id=? AND date&#95;of&#95;birth&gt;? AND date&#95;of&#95;birth&lt;?)</pre></div></details>
-  </Fragment>
-</TryIt>
-
-<Check
-  client:visible
-  question="A report runs WHERE employee_id = ? AND sale_date BETWEEN ? AND ? on the sales table. Which index serves it best?"
-  options={[
-    '(sale_date, employee_id), because dates are more selective',
-    '(employee_id, sale_date), because the equality column goes first',
-    'Either order; both columns are in the index',
-  ]}
-  answer={1}
-  explain="With employee_id first, all sales of that employee sit together, sorted by date, and both conditions are access predicates. With sale_date first, the scan covers every sale in the date range and the employee condition is only a filter. The operators decide the order, not the selectivity."
-/>

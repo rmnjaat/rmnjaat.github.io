@@ -16,7 +16,7 @@ Binary trees do degenerate. Insert sorted keys into a naive binary tree and it t
 
 ## What actually happens
 
-A B-tree is balanced by construction and stays balanced through every write. When a leaf fills up it splits, and the split propagates upwards only when the parent is full too. Every leaf is always the same number of levels below the root. There is no sequence of inserts or deletes that makes one path longer than another, so there is nothing for a rebuild to straighten out. [The B-Tree](/sql/anatomy/the-tree/) lesson walks through the structure.
+A B-tree is balanced by construction and stays balanced through every write. When a leaf fills up it splits, and the split propagates upwards only when the parent is full too. Every leaf is always the same number of levels below the root. There is no sequence of inserts or deletes that makes one path longer than another, so there is nothing for a rebuild to straighten out. [The B-Tree](/sql/anatomy/the-tree/) page walks through the structure.
 
 The depth of the tree is the number that matters for a lookup, and it is remarkably stable. Roughly speaking, the number of entries has to grow by a factor of a hundred before the tree needs one more level. Leaving space behind through updates and deletes does not change that: an index that is twice as large as it needs to be is almost never one level deeper than it needs to be.
 
@@ -30,6 +30,6 @@ Put a number on the possible gain first. A rebuild packs the leaf nodes, and in 
 
 Do not schedule rebuilds on a calendar. Measure. Every engine can report the number of pages in an index and the number of entries, and from that the fill level. A rebuild is justified when the index is a lot larger than a fresh build of the same data would be, typically after deleting a large share of a table, after an archiving job, or when a monitoring query shows a range scan reading far more leaves than its row count explains.
 
-Keep the maintenance processes running; in PostgreSQL that means autovacuum tuned to keep up with the delete rate. And do not treat the index as the problem when the real problem is the query, which [Unit 2 (the where clause)](/sql/where-clause/) covers at length.
+Keep the maintenance processes running; in PostgreSQL that means autovacuum tuned to keep up with the delete rate. And do not treat the index as the problem when the real problem is the query, which [Chapter 2 (the where clause)](/sql/where-clause/) covers at length.
 
 <Callout kind="note">A rebuild that makes a query faster is evidence of bloat, not of degeneration. If the index was not bloated, the rebuilt index has the same shape as before and the query runs at the same speed.</Callout>

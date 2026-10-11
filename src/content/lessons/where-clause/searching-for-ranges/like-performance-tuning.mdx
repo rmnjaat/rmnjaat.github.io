@@ -3,16 +3,7 @@ title: Indexing LIKE Filters
 subtitle: LIKE uses the index only for the characters before the first wildcard. Put the wildcard at the front and the pattern cannot narrow the scan at all.
 chapter: where-clause
 order: 4.2
-kind: lesson
-minutes: 10
 summary: Why the position of the wildcard decides whether a LIKE condition can use an index, how one LIKE expression splits into an access predicate and a filter predicate, what goes wrong with bind parameters, and which full-text features to use instead of a leading wildcard.
-prereqs: "You should have read <a href='/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates/'>Greater, Less and BETWEEN</a> and know the difference between an access predicate and a filter predicate."
-outcomes:
-  - Why some LIKE search terms index well and others cannot
-  - How one LIKE expression becomes an access predicate and a filter predicate
-  - How the length of the prefix changes the scanned index range
-  - What happens when the search term is a bind parameter
-  - Which full-text search features replace a leading wildcard
 recap:
   - Only the characters before the first wildcard are an access predicate. The rest of the pattern is a filter predicate that does not narrow the scanned range.
   - The more selective the prefix, the smaller the scanned range and the faster the lookup.
@@ -21,7 +12,7 @@ recap:
   - For full-text search use CONTAINS, MATCH AGAINST or the @@ operator, not LIKE.
 source: https://use-the-index-luke.com/sql/where-clause/searching-for-ranges/like-performance-tuning
 ---
-import { Callout, KeyIdea, Figure, EngineTabs, Check, TryIt } from '@/components/mdx';
+import { Callout, KeyIdea, Figure, EngineTabs } from '@/components/mdx';
 
 `LIKE` is a frequent source of surprises. The same statement is fast for one search term and slow for the next, because some terms can use an index and others cannot. What makes the difference is where the wildcard characters sit.
 
@@ -191,35 +182,3 @@ Even a plan that is correctly built for a leading wildcard can be too slow. Then
   </Fragment>
 </EngineTabs>
 
-## 6. Try it
-
-The playground has an index on `last_name`. Because SQLite's `LIKE` is case-insensitive, the query uses `GLOB`, whose `*` plays the role of `%`. The prefix becomes a range in the plan.
-
-<TryIt id="2.4.2" tasks={[
-  { text: 'Run the query. The plan turns the prefix into a range: <code>(last_name&gt;? AND last_name&lt;?)</code>.', sql: "glob\\s+'Win\\*", plan: 'last_name>\\? AND last_name<\\?' },
-  { text: 'Replace the pattern with <code>\'*nand\'</code>, a leading wildcard. The plan should fall back to <code>SCAN employees</code>.', sql: "glob\\s+'\\*nand'", plan: '^SCAN employees' },
-  { text: 'Write the prefix search as an explicit range, <code>last_name &gt;= \'Win\' AND last_name &lt; \'Wio\'</code>, and compare the plan with task 1.', sql: "last_name\\s*>=\\s*'Win'", plan: 'last_name>\\? AND last_name<\\?' },
-]} setup={`CREATE INDEX emp_name ON employees (last_name); ANALYZE;`} sql={`SELECT first_name, last_name
-  FROM employees
- WHERE last_name GLOB 'Win*d';`}>
-  <Fragment slot="hints">
-    <details class="hint"><summary>Hint for task 2</summary><div class="d">With nothing before the wildcard there is no entry to traverse to, and the only remaining option is to read every row.</div></details>
-    <details class="hint"><summary>Show solution</summary><div class="d"><pre>SELECT first&#95;name, last&#95;name FROM employees WHERE last&#95;name GLOB '&#42;nand';
--- plan: SCAN employees
-SELECT first&#95;name, last&#95;name FROM employees
- WHERE last&#95;name &gt;= 'Win' AND last&#95;name &lt; 'Wio';
--- plan: SEARCH employees USING INDEX emp&#95;name (last&#95;name&gt;? AND last&#95;name&lt;?)</pre></div></details>
-  </Fragment>
-</TryIt>
-
-<Check
-  client:visible
-  question="How can you index a LIKE search whose only wildcard is at the beginning, such as '%TERM'?"
-  options={[
-    'Create a normal B-tree index on the column; the optimizer reverses the pattern on its own.',
-    'Index the reversed string with a function-based index and search for the reversed term with a trailing wildcard.',
-    'It is impossible; only a full-text index can help.',
-  ]}
-  answer={1}
-  explain="A pattern that ends with a fixed suffix is a prefix search on the reversed string. A function-based index on REVERSE(column) with a query on REVERSE(column) LIKE 'MRET%' gives the index a prefix to work with. A pattern with wildcards at both ends is a different matter and needs full-text search."
-/>

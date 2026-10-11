@@ -3,16 +3,7 @@ title: Selecting Top-N Rows
 subtitle: Asking for ten rows is only cheap when the database knows in advance that ten is all you want, and has an index that delivers them in order. Then it stops after ten.
 chapter: partial-results
 order: 1
-kind: lesson
-minutes: 10
 summary: What a top-N query is, why the optimizer must be told that only N rows are needed, the FETCH FIRST, LIMIT, TOP and ROWNUM syntax per engine, how the plans differ with and without a pipelined ORDER BY, and why a pipelined top-N query scales with the rows selected rather than the table size.
-prereqs: "You should have read <a href='/sql/sorting-grouping/indexed-order-by/'>Indexed ORDER BY</a> and know what a pipelined ORDER BY is."
-outcomes:
-  - Why closing the cursor after ten rows does not make the query cheaper
-  - The top-N syntax of each engine and what the SQL standard finally added
-  - How to recognise a pipelined top-N query and a materialized one in the plan
-  - Why a pipelined top-N query's response time barely depends on the table size
-  - Why the same query still gets slower the further you page, which the next lesson solves
 recap:
   - A top-N query limits the result to a fixed number of rows. It is only efficient when its ORDER BY is pipelined.
   - The optimizer can only plan for a partial result if the query says so. Fetching ten rows and closing the statement is invisible at planning time.
@@ -21,9 +12,9 @@ recap:
   - A pipelined top-N query's response time grows with the number of rows selected, not with the table. Only a deeper B-tree makes it slightly slower.
 source: https://use-the-index-luke.com/sql/partial-results/top-n-queries
 ---
-import { Callout, KeyIdea, Figure, EngineTabs, Check, TryIt } from '@/components/mdx';
+import { Callout, KeyIdea, Figure, EngineTabs } from '@/components/mdx';
 
-Most screens show the first few rows of something: the ten newest messages, the twenty best matches, whatever fits above the fold. Behind each one is a query that could return far more. If the database has to sort every candidate row to find the ten newest, the screen pays for all of them. A pipelined `ORDER BY` delivers the first rows without reading and sorting the rest, which gives it a very low startup cost and lets the query stop after a handful of rows. This unit is about telling the database that it may stop, in the syntax of each engine, and about what happens when it cannot.
+Most screens show the first few rows of something: the ten newest messages, the twenty best matches, whatever fits above the fold. Behind each one is a query that could return far more. If the database has to sort every candidate row to find the ten newest, the screen pays for all of them. A pipelined `ORDER BY` delivers the first rows without reading and sorting the rest, which gives it a very low startup cost and lets the query stop after a handful of rows. This chapter is about telling the database that it may stop, in the syntax of each engine, and about what happens when it cannot.
 
 ## 1. What a top-N query is
 
@@ -98,7 +89,7 @@ All of these are recognised by their engine as top-N queries. The syntax is more
 
 ## 3. Two plans for the same query
 
-When the optimizer knows that ten rows are enough, it prefers a pipelined `ORDER BY` wherever one is possible. With the index `sales_dt_pr` on `(sale_date, product_id)` from the previous unit, the plans look like this.
+When the optimizer knows that ten rows are enough, it prefers a pipelined `ORDER BY` wherever one is possible. With the index `sales_dt_pr` on `(sale_date, product_id)` from the previous chapter, the plans look like this.
 
 <EngineTabs>
   <Fragment slot="db2">
@@ -228,43 +219,9 @@ The pipelined version pays off twice. The immediate gain is response time. The l
 <p slot="caption">The shape of the original measurement over a growing data volume: the materialized variant grows linearly, the pipelined variant stays flat. The numbers are illustrative.</p>
 </Figure>
 
-The response time of a pipelined top-N query is independent of the table size, not of the page size. Ask for twenty rows and it takes twice as long as for ten. That becomes a problem for paging, where the query for page two typically starts at the first row again, reads the ten rows of page one, throws them away, and only then reaches the rows it was asked for. Page fifty reads and discards 490 rows. The [next lesson](/sql/partial-results/fetch-next-page/) solves that.
+The response time of a pipelined top-N query is independent of the table size, not of the page size. Ask for twenty rows and it takes twice as long as for ten. That becomes a problem for paging, where the query for page two typically starts at the first row again, reads the ten rows of page one, throws them away, and only then reaches the rows it was asked for. Page fifty reads and discards 490 rows. The [next page](/sql/partial-results/fetch-next-page/) solves that.
 
 <Callout kind="warning" title="Common mistake">Indexing the `ORDER BY` column alone when the query also has a where clause. `WHERE subsidiary_id = 20 ORDER BY sale_date DESC FETCH FIRST 10 ROWS ONLY` needs `(subsidiary_id, sale_date)`. With an index on `sale_date` only, the database walks backwards past every sale of the other subsidiaries until it has found ten of the right one.</Callout>
 
 <Callout kind="note" title="Further reading">The blog article [Finding the Best Match With a Top-N Query](https://blog.fatalmind.com/2010/09/29/finding-the-best-match-with-a-top-n-query/) applies the same idea to "best match" searches.</Callout>
 
-## 5. Try it yourself
-
-SQLite uses `LIMIT`. Its sort shows up as `USE TEMP B-TREE FOR ORDER BY`; when an index supplies the order that line vanishes and the plan reads `SCAN sales USING INDEX`.
-
-<TryIt id="7.1" tasks={[
-  { text: 'Run the query as given. There is no index on <code>sale_date</code> yet, so the plan sorts all 20,000 rows before the first ten come out.', sql: 'order\\s+by\\s+sale_date\\s+desc[\\s\\S]*limit\\s+10', plan: 'TEMP B-TREE FOR ORDER BY' },
-  { text: 'Create an index on <code>sale_date</code> and run the query again. The temp b-tree is gone; the index is read backwards and the scan stops after ten entries.', sql: 'create\\s+index[\\s\\S]*\\(\\s*sale_date\\s*\\)' },
-  { text: 'Change the ORDER BY to <code>eur_value DESC</code>. The index cannot help and the sort returns.', sql: 'order\\s+by\\s+eur_value\\s+desc', plan: 'TEMP B-TREE FOR ORDER BY' },
-]} sql={`SELECT sale_id, sale_date, eur_value
-  FROM sales
- ORDER BY sale_date DESC
- LIMIT 10;`}>
-  <Fragment slot="hints">
-    <details class="hint"><summary>Hint for task 2</summary><div class="d">After creating the index, run the SELECT once more; the plan belongs to the statement you ran last.</div></details>
-    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX sales&#95;date ON sales (sale&#95;date);
-SELECT sale&#95;id, sale&#95;date, eur&#95;value
-  FROM sales
- ORDER BY sale&#95;date DESC
- LIMIT 10;
--- plan: SCAN sales USING INDEX sales&#95;date</pre></div></details>
-  </Fragment>
-</TryIt>
-
-<Check
-  client:visible
-  question="A query has ORDER BY sale_date DESC and FETCH FIRST 10 ROWS ONLY. The plan shows SORT ORDER BY STOPKEY over a full table scan. What did the database do?"
-  options={[
-    'It read ten rows and stopped, because STOPKEY means an early exit.',
-    'It read the whole table but kept only the ten most recent rows in memory while sorting.',
-    'It read about half the table, until it had found ten rows newer than the rest.',
-  ]}
-  answer={1}
-  explain="A sort has to see every input row before it knows which one comes first, so the full scan runs to the end. STOPKEY on the sort means the database only materialized the ten rows it needed instead of the whole sorted result. That saves memory, not reads. Only a pipelined ORDER BY lets the query stop early."
-/>

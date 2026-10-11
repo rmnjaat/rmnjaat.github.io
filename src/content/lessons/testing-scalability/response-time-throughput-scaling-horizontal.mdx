@@ -3,16 +3,7 @@ title: Response Time and Throughput
 subtitle: Bigger hardware is a wider road, not a faster car. It carries more queries at once and does almost nothing for how long one of them takes.
 chapter: testing-scalability
 order: 3
-kind: lesson
-minutes: 9
 summary: Why more CPUs and more servers raise throughput but not single-query response time, why indexing is the lever for response time even in NoSQL systems, what eventual consistency and the CAP theorem trade away, how infrastructure latency and disk seeks add up, and what caching and SSDs change.
-prereqs: "You should have read <a href='/sql/testing-scalability/system-load/'>System load</a>. Knowing what a B-tree traversal costs, from <a href='/sql/anatomy/the-tree/'>The B-tree</a>, helps with the disk seek arithmetic."
-outcomes:
-  - Why single-core speed stopped growing and what multi-core and horizontal scaling do instead
-  - Why response time and throughput are two different dimensions, and which one hardware moves
-  - What NoSQL horizontal scalability actually buys, and what eventual consistency and the CAP theorem give up
-  - How network hops and disk seeks accumulate into response time, and why production can be slower than a laptop
-  - What caching and SSDs do to the seek cost, and why joins still have a reputation
 recap:
   - Performance has two dimensions, response time and throughput. More hardware typically raises throughput and leaves response time where it was.
   - Since the early 2000s single cores have not become much faster. Multi-core CPUs and extra servers run more tasks at once; neither makes one task quicker.
@@ -21,7 +12,7 @@ recap:
   - Every network hop and every disk seek adds latency. One traversal costs a few dozen milliseconds on spinning disks; a join can trigger thousands of seeks. Caching and SSDs soften this but do not change the shape.
 source: https://use-the-index-luke.com/sql/testing-scalability/response-time-throughput-scaling-horizontal
 ---
-import { Callout, KeyIdea, Check, ScaleChart } from '@/components/mdx';
+import { Callout, KeyIdea, ScaleChart } from '@/components/mdx';
 
 When a system is slow, the first proposal is usually more hardware. A bigger machine rarely makes one query faster; it mostly lets more queries run at once, and those are different things. A wider highway carries more cars; it does not let any one of them drive faster. More hardware, for the same reason, does not automatically fix a slow SQL statement.
 
@@ -39,7 +30,7 @@ To make a single search faster you need an efficient search structure, and that 
 
 <Callout kind="important">Whatever the database, relational or not, the fastest way to cut a query's response time is a correct index.</Callout>
 
-Proper indexing means exploiting the [logarithmic scalability](/sql/anatomy/the-tree/) of the B-tree all the way: every condition an access predicate, the scanned range no wider than the result. In practice indexing is done sloppily far more often than not, and the chart from the [data volume](/sql/testing-scalability/data-volume/) lesson shows what sloppy costs.
+Proper indexing means exploiting the [logarithmic scalability](/sql/anatomy/the-tree/) of the B-tree all the way: every condition an access predicate, the scanned range no wider than the result. In practice indexing is done sloppily far more often than not, and the chart from the [data volume](/sql/testing-scalability/data-volume/) page shows what sloppy costs.
 
 <ScaleChart client:visible n="3.4" title="Response time by data volume, sloppy and proper indexing" />
 
@@ -67,7 +58,7 @@ More hardware will typically not improve response times, and it can make them wo
 
 ## 5. Disk seeks, caching and SSDs
 
-One latency deserves its own paragraph: the disk seek. A spinning hard disk has to move its heads to the right track before it can read, and that takes a few milliseconds each time. A four-level B-tree traversal does it four times, which comes to a few dozen milliseconds. That is an age for a computer and still below what a person notices, as long as it happens once. A single SQL statement can easily cause hundreds or thousands of seeks, and a join between several tables is the most common way to do it. This is the root of the reputation joins have for being slow, and the [next unit](/sql/join/) is about indexing them so that they are not.
+One latency deserves its own paragraph: the disk seek. A spinning hard disk has to move its heads to the right track before it can read, and that takes a few milliseconds each time. A four-level B-tree traversal does it four times, which comes to a few dozen milliseconds. That is an age for a computer and still below what a person notices, as long as it happens once. A single SQL statement can easily cause hundreds or thousands of seeks, and a join between several tables is the most common way to do it. This is the root of the reputation joins have for being slow, and the [next chapter](/sql/join/) is about indexing them so that they are not.
 
 <Callout kind="note" title="Solid state disks and caching">
 
@@ -81,14 +72,3 @@ Caching and SSDs reduce the seek problem dramatically, and they reduce it for ev
 
 <Callout kind="note" title="Further reading">The setup behind the chart is described in [System load](/sql/testing-scalability/system-load/). Wikipedia on [NoSQL](https://en.wikipedia.org/wiki/NoSQL), [eventual consistency](https://en.wikipedia.org/wiki/Eventual_consistency) and the [CAP theorem](https://en.wikipedia.org/wiki/CAP_theorem). B-tree indexes in [CouchDB](https://guide.couchdb.org/draft/btree.html) and [MongoDB](https://www.mongodb.com/docs/manual/indexes/). Markus Winand's article [Choosing NoSQL for the right reason](https://blog.fatalmind.com/2011/05/13/choosing-nosql-for-the-right-reason/).</Callout>
 
-<Check
-  client:visible
-  question="A single report query takes 30 seconds on a lightly loaded server. Four more servers are added behind a load balancer. What happens to that query?"
-  options={[
-    'It takes about 6 seconds, because the work is spread over five machines.',
-    'It still takes about 30 seconds. One query runs on one node and does the same reads. Only a better access path shortens it.',
-    'It gets faster because each server now has a bigger share of the cache.',
-  ]}
-  answer={1}
-  explain="More servers raise throughput: each node serves fewer queries. A single query still does all of its own work on the node it lands on, and with the server lightly loaded there was no queue to remove. Response time is the dimension that indexing moves, not hardware."
-/>

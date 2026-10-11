@@ -89,7 +89,7 @@ A SQL Server plan is a tree of operators. In text form, the `|--` markers show t
 | `Filter` | A predicate evaluated as a separate step because it could not be pushed into the operator that produced the rows. |
 | `Compute Scalar` | Evaluates expressions in the select list, such as the type conversion of a `COUNT(*)` result; harmless on its own. |
 
-The naming is consistent: a seek reads a specific part of an index, a scan reads the whole thing. A `Top` above a seek is cheap, a `Top` above a `Sort` is not, because the sort has to finish before it knows which rows come first. The [top-N lesson](/sql/partial-results/top-n-queries/) is about keeping the `Sort` out of that picture.
+The naming is consistent: a seek reads a specific part of an index, a scan reads the whole thing. A `Top` above a seek is cheap, a `Top` above a `Sort` is not, because the sort has to finish before it knows which rows come first. The [top-N page](/sql/partial-results/top-n-queries/) is about keeping the `Sort` out of that picture.
 
 ## Access predicates and filter predicates
 
@@ -144,7 +144,7 @@ The clearest signal is in the actual plan. Since SQL Server 2016 the seek operat
 
 The gap pattern applies here too. With an index on `(subsidiary_id, last_name, first_name)` and `WHERE subsidiary_id = 20 AND first_name = 'Markus'`, the seek shows `SEEK:([subsidiary_id]=(20))` and `WHERE:([first_name]=N'Markus')`. Both columns are in the index, but the entries of subsidiary 20 are ordered by `last_name`, so `first_name` cannot bound the seek. In the graphical plan this is the difference between the "Seek Predicates" and the "Predicate" entries of the same tooltip; the tabular plan shows both inside one `StmtText` line, which is why it is the better form to post when asking for help.
 
-<Callout kind="warning" title="A filter on an index column is still a filter">An `Index Seek` whose `Predicate` is doing most of the filtering reads a range that grows with the table. It passes every test on a small database and fails in production under load. Treat every condition that is not in `Seek Predicates` as a filter. The [range lesson](/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates/) explains the split by example and the [data volume lesson](/sql/testing-scalability/data-volume/) measures it.</Callout>
+<Callout kind="warning" title="A filter on an index column is still a filter">An `Index Seek` whose `Predicate` is doing most of the filtering reads a range that grows with the table. It passes every test on a small database and fails in production under load. Treat every condition that is not in `Seek Predicates` as a filter. The [range page](/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates/) explains the split by example and the [data volume page](/sql/testing-scalability/data-volume/) measures it.</Callout>
 
 <Callout kind="note" title="A Filter operator means the predicate came late">When the residual predicate needs a column that is not in the index, it cannot be checked at the seek. The plan then does the lookup first and evaluates the condition afterwards, either as a `WHERE:()` on the lookup or as a separate `Filter` operator above the join. All rows in the seek range are fetched before any are discarded.</Callout>
 

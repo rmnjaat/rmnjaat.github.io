@@ -3,16 +3,7 @@ title: Index Merge
 subtitle: One index per column sounds flexible. Combining them at query time costs two tree traversals and a merge, and one well-designed index beats that almost every time.
 chapter: where-clause
 order: 4.3
-kind: lesson
-minutes: 8
 summary: Why one concatenated index usually beats one index per column, why two independent range conditions cannot both be access predicates in a B-tree, what combining two indexes costs, and where bitmap indexes fit and where they do not.
-prereqs: "You should have read <a href='/sql/where-clause/the-equals-operator/concatenated-keys/'>Concatenated Keys</a> and the two previous lessons on range conditions."
-outcomes:
-  - Why a single multi-column index is usually the right answer
-  - Why no B-tree can serve two independent range conditions without a filter predicate
-  - What it costs to scan two indexes and combine the results
-  - What bitmap indexes are good for and why they are unusable for OLTP
-  - How the in-memory bitmap hybrid works and what it tells you about the index design
 recap:
   - A concatenated index is better than one index per column in most cases.
   - An index is a chain, not a chessboard. It can support only one range condition as an access predicate.
@@ -21,9 +12,9 @@ recap:
   - Bitmap indexes combine easily but scale terribly for writes. The in-memory bitmap conversion that many databases do is an optimizer's last resort.
 source: https://use-the-index-luke.com/sql/where-clause/searching-for-ranges/index-merge-performance
 ---
-import { Callout, KeyIdea, Figure, EngineTabs, Check, TryIt } from '@/components/mdx';
+import { Callout, KeyIdea, Figure, EngineTabs } from '@/components/mdx';
 
-One of the most common indexing questions is whether to create one index per column of the where clause or a single index over all of them. In most cases the answer is short: one index with several columns, a concatenated index, as described in [Concatenated Keys](/sql/where-clause/the-equals-operator/concatenated-keys/). This lesson is about the cases where that is not quite enough, and about what the alternative costs.
+One of the most common indexing questions is whether to create one index per column of the where clause or a single index over all of them. In most cases the answer is short: one index with several columns, a concatenated index, as described in [Concatenated Keys](/sql/where-clause/the-equals-operator/concatenated-keys/). This page is about the cases where that is not quite enough, and about what the alternative costs.
 
 ## 1. Two independent range conditions
 
@@ -60,7 +51,7 @@ CHEN     1960     name ok, date no  (name < 'C'?)     |  x x . . .
 
 The simplest option is to accept the filter predicate and use a multi-column index anyway. In many cases that is the best solution. The index should then start with the more selective column, so that the column with the better selectivity gets the access predicate and the other does the filtering.
 
-This may be where the "most selective first" myth came from. The rule is right only when a filter predicate cannot be avoided; whenever every condition can be an access predicate, the operators decide the column order, as the previous lessons showed.
+This may be where the "most selective first" myth came from. The rule is right only when a filter predicate cannot be avoided; whenever every condition can be an access predicate, the operators decide the column order, as the previous pages showed.
 
 ## 3. Two indexes and the cost of combining them
 
@@ -68,7 +59,7 @@ The other option is two separate indexes, one per column. The database then scan
 
 <KeyIdea>Two traversals and a merge always cost more than one scan of the right index.</KeyIdea>
 
-Databases combine indexes in two ways. The first is an index join, using the join algorithms that [Unit 4](/sql/join/) explains. The second borrows a technique from data warehousing.
+Databases combine indexes in two ways. The first is an index join, using the join algorithms that [Chapter 4](/sql/join/) explains. The second borrows a technique from data warehousing.
 
 ## 4. Bitmap indexes
 
@@ -136,38 +127,3 @@ Many databases offer a hybrid. When no better access path exists, they run sever
   </Fragment>
 </EngineTabs>
 
-## 5. Try it
-
-SQLite never intersects two indexes for an `AND`. The playground has one index on `UPPER(last_name)` and one on `date_of_birth`, and the plan shows that only one of them is used while the other condition is filtered on the rows. The query matches 20 employees.
-
-<TryIt id="2.4.3" tasks={[
-  { text: 'Run the query. The plan uses a single index; the other condition does not appear.', sql: 'upper\\(last_name\\)\\s*<', plan: '^SEARCH employees USING INDEX emp_(up_name|dob) \\(' },
-  { text: 'Create a concatenated index <code>emp_up_dob</code> on <code>(UPPER(last_name), date_of_birth)</code> and run the query again. Only the first column shows up as an access predicate: <code>(&lt;expr&gt;&lt;?)</code>.', sql: 'create\\s+index\\s+emp_up_dob' },
-  { text: 'Change <code>AND</code> to <code>OR</code>. For a disjunction SQLite does combine the two single-column indexes; look for <code>MULTI-INDEX OR</code>.', sql: "upper\\(last_name\\)\\s*<\\s*'C'\\s+or", plan: 'MULTI-INDEX OR' },
-]} setup={`CREATE INDEX emp_up_name ON employees (UPPER(last_name)); CREATE INDEX emp_dob ON employees (date_of_birth); ANALYZE;`} sql={`SELECT first_name, last_name, date_of_birth
-  FROM employees
- WHERE UPPER(last_name) < 'C'
-   AND date_of_birth    < '1965-01-01';`}>
-  <Fragment slot="hints">
-    <details class="hint"><summary>Hint for task 2</summary><div class="d">Two range conditions, one chain. The index can only stop at the first name that fails the name condition; every date inside that range has to be checked entry by entry.</div></details>
-    <details class="hint"><summary>Show solution</summary><div class="d"><pre>CREATE INDEX emp&#95;up&#95;dob ON employees (UPPER(last&#95;name), date&#95;of&#95;birth);
-SELECT first&#95;name, last&#95;name, date&#95;of&#95;birth FROM employees
- WHERE UPPER(last&#95;name) &lt; 'C' AND date&#95;of&#95;birth &lt; '1965-01-01';
--- plan: SEARCH employees USING INDEX emp&#95;up&#95;dob (&lt;expr&gt;&lt;?)
-SELECT first&#95;name, last&#95;name, date&#95;of&#95;birth FROM employees
- WHERE UPPER(last&#95;name) &lt; 'C' OR date&#95;of&#95;birth &lt; '1965-01-01';
--- plan: MULTI-INDEX OR ... emp&#95;up&#95;name ... emp&#95;dob</pre></div></details>
-  </Fragment>
-</TryIt>
-
-<Check
-  client:visible
-  question="A query has WHERE last_name < ? AND date_of_birth < ?. Which statement is true?"
-  options={[
-    'An index on (last_name, date_of_birth) serves both conditions as access predicates.',
-    'No B-tree index can serve both conditions as access predicates; one of them is a filter whatever the column order.',
-    'Two single-column indexes are always faster than one concatenated index for this query.',
-  ]}
-  answer={1}
-  explain="An index is a chain with one sort order. Only one range condition can bound the scan; the second is checked entry by entry. A concatenated index led by the more selective column is usually the best compromise, and combining two indexes costs two traversals plus a merge."
-/>

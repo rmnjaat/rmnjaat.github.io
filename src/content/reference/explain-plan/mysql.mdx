@@ -183,13 +183,13 @@ The column does not have to be behind a `LIKE` to be demoted. With an index on `
 
 <Callout kind="note" title="key_len is the fastest check">Compare `key_len` with the byte length of the full index key. If it is shorter, some index column is not in the access predicate, and the remaining conditions show up as `Using index condition` or `Using where`. The `ref` column confirms it: it lists one `const` (or one column name, inside a join) per key part used. The JSON format spells this out as `used_key_parts`.</Callout>
 
-<Callout kind="warning" title="A filter on an index column is still a filter">`type: ref` with the right index in `key` looks like a solved problem. If `key_len` is short, the index range still grows with the table and the condition in `Extra` is doing the real work. Whatever `EXPLAIN` does not prove to be part of the key is a filter. The [data volume lesson](/sql/testing-scalability/data-volume/) shows how such a query degrades.</Callout>
+<Callout kind="warning" title="A filter on an index column is still a filter">`type: ref` with the right index in `key` looks like a solved problem. If `key_len` is short, the index range still grows with the table and the condition in `Extra` is doing the real work. Whatever `EXPLAIN` does not prove to be part of the key is a filter. The [data volume page](/sql/testing-scalability/data-volume/) shows how such a query degrades.</Callout>
 
 ## Reading the numbers
 
 In the tabular form, `rows` is the number of rows the optimizer expects to examine for this table per execution, and `filtered` is the percentage it expects to survive the conditions that are applied after the access. Multiply the two to get the rows passed to the next table. A `filtered` well below 100 means a filter predicate is doing the work the index should be doing.
 
-The tree form prints `(cost=175.00 rows=500)` per node. The cost is in optimizer units, comparable only between plans of the same query. `rows` is the estimated output of that node.
+The tree form prints `(cost=175.00 rows=500)` per node. The cost is in optimizer chapters, comparable only between plans of the same query. `rows` is the estimated output of that node.
 
 `EXPLAIN ANALYZE` appends a second group: `(actual time=0.062..0.510 rows=33 loops=1)`. The first time is milliseconds until the first row, the second until the last; `rows` is what the node actually produced; `loops` is how often it ran. Like elsewhere, the times and rows are per loop, so multiply by `loops` for the inner side of a nested loops join.
 
